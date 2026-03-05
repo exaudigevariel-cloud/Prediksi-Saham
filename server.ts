@@ -1,5 +1,5 @@
 import express from "express";
-import YahooFinance from "yahoo-finance2";
+import yahooFinance from "yahoo-finance2";
 import { GoogleGenAI } from "@google/genai";
 
 type MarketType = "stock" | "forex" | "crypto" | "unknown";
@@ -215,7 +215,6 @@ const VALID_INTERVALS = new Set([
 
 const VALID_RANGES = new Set(["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "max"]);
 const FX_CODES = new Set(["USD", "EUR", "JPY", "GBP", "AUD", "NZD", "CAD", "CHF"]);
-const yahooFinance = new YahooFinance();
 
 interface AppBuildOptions {
   includeViteMiddleware?: boolean;
