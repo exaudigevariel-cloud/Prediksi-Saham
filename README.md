@@ -49,8 +49,26 @@ This project is configured for Vercel with:
    - `GEMINI_API_KEY` (optional but recommended)
    - `NODE_ENV=production`
 
+## Deploy to Netlify
+
+This project is configured for Netlify with:
+- function adapter: `netlify/functions/api.ts`
+- routing/build config: `netlify.toml`
+
+### Steps
+1. Push repo to GitHub.
+2. In Netlify, choose **Add new site** > **Import from Git**.
+3. Select this repository.
+4. Netlify will read `netlify.toml` automatically.
+5. Set environment variables:
+   - `GEMINI_API_KEY` (optional)
+   - `NODE_ENV=production`
+6. Deploy, then verify:
+   - `/api/health` returns `{"status":"ok"}`.
+
 ## Deploy Notes
 
 - `npm start` and `npm run dev` run `tsx server.ts` for local.
 - On Vercel, API traffic is served through `api/[...path].ts`.
 - SPA fallback is handled by `vercel.json`.
+- On Netlify, API traffic is served through `/.netlify/functions/api`.

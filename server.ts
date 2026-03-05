@@ -1735,7 +1735,11 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: s
   }
 }
 
-if (process.env.VERCEL !== "1") {
+function isServerlessRuntime(): boolean {
+  return process.env.VERCEL === "1" || process.env.NETLIFY === "true" || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME);
+}
+
+if (!isServerlessRuntime()) {
   startServer().catch((error) => {
     console.error("Fatal server startup error:", error);
     process.exit(1);
