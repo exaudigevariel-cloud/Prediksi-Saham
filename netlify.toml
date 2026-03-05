@@ -8,7 +8,7 @@
 
 [functions]
   node_bundler = "esbuild"
-  external_node_modules = ["express", "serverless-http", "yahoo-finance2", "@google/genai"]
+  external_node_modules = ["express", "serverless-http", "yahoo-finance2", "@google/genai", "vite", "lightningcss", "@tailwindcss/vite", "tailwindcss"]
 
 [[redirects]]
   from = "/api/*"
