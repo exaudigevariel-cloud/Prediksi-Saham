@@ -1,5 +1,4 @@
 import express from "express";
-import yahooFinance from "yahoo-finance2";
 import { GoogleGenAI } from "@google/genai";
 
 type MarketType = "stock" | "forex" | "crypto" | "unknown";
@@ -216,6 +215,13 @@ const VALID_INTERVALS = new Set([
 const VALID_RANGES = new Set(["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "max"]);
 const FX_CODES = new Set(["USD", "EUR", "JPY", "GBP", "AUD", "NZD", "CAD", "CHF"]);
 
+type YahooFinanceClient = {
+  chart: (symbol: string, options: any) => Promise<any>;
+  quote: (symbol: string) => Promise<any>;
+};
+
+let yahooFinanceClientPromise: Promise<YahooFinanceClient> | null = null;
+
 interface AppBuildOptions {
   includeViteMiddleware?: boolean;
   includeStatic?: boolean;
@@ -407,6 +413,36 @@ function validateRange(input?: string): string {
   return VALID_RANGES.has(value) ? value : "3mo";
 }
 
+async function getYahooFinanceClient(): Promise<YahooFinanceClient> {
+  if (!yahooFinanceClientPromise) {
+    yahooFinanceClientPromise = import("yahoo-finance2").then((mod: any) => {
+      const raw = mod?.default ?? mod;
+      const candidates = [raw, raw?.default, mod];
+
+      for (const candidate of candidates) {
+        if (!candidate) continue;
+        if (typeof candidate.chart === "function" && typeof candidate.quote === "function") {
+          return candidate as YahooFinanceClient;
+        }
+        if (typeof candidate === "function") {
+          try {
+            const instance = new candidate();
+            if (typeof instance.chart === "function" && typeof instance.quote === "function") {
+              return instance as YahooFinanceClient;
+            }
+          } catch {
+            // ignore and try next candidate shape
+          }
+        }
+      }
+
+      throw new Error("Yahoo Finance client initialization failed");
+    });
+  }
+
+  return yahooFinanceClientPromise;
+}
+
 function intervalToMs(interval: string): number | null {
   const map: Record<string, number> = {
     "1m": 60_000,
@@ -572,6 +608,7 @@ function getPeriod1(range: string): string {
 }
 
 async function fetchHistory(symbol: SymbolInfo, interval: string, range: string): Promise<Candle[]> {
+  const yahooFinance = await getYahooFinanceClient();
   const queryOptions: any = {
     period1: getPeriod1(range),
     interval,
@@ -617,6 +654,7 @@ async function fetchHistory(symbol: SymbolInfo, interval: string, range: string)
 }
 
 async function fetchQuote(symbol: SymbolInfo): Promise<any> {
+  const yahooFinance = await getYahooFinanceClient();
   const quote = await withTimeout(
     yahooFinance.quote(symbol.querySymbol),
     REQUEST_TIMEOUT_MS,
