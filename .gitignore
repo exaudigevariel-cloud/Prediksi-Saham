@@ -8,3 +8,6 @@ coverage/
 !.env.example
 preview-*.png
 *.zip
+
+# Local Netlify folder
+.netlify
