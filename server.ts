@@ -546,6 +546,16 @@ function getClosedSignalCandles(candles: Candle[], interval: string): Candle[] {
   return candles;
 }
 function normalizeSymbol(input: string): SymbolInfo {
+  const metalToYahooSymbol = (base: string): string => {
+    const map: Record<string, string> = {
+      XAU: "GC=F",
+      XAG: "SI=F",
+      XPT: "PL=F",
+      XPD: "PA=F",
+    };
+    return map[base] ?? `${base}USD=X`;
+  };
+
   const raw = (input || "").trim().toUpperCase().replace(/\s+/g, "");
   if (!raw) {
     return { input, displaySymbol: "AAPL", querySymbol: "AAPL", marketType: "stock" };
@@ -557,7 +567,7 @@ function normalizeSymbol(input: string): SymbolInfo {
       return {
         input,
         displaySymbol: `${base}/${quote}`,
-        querySymbol: `${base}${quote}=X`,
+        querySymbol: metalToYahooSymbol(base),
         marketType: "forex",
       };
     }
@@ -596,7 +606,7 @@ function normalizeSymbol(input: string): SymbolInfo {
       return {
         input,
         displaySymbol: `${base}/${quote}`,
-        querySymbol: `${base}${quote}=X`,
+        querySymbol: metalToYahooSymbol(base),
         marketType: "forex",
       };
     }
