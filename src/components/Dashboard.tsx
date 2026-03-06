@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { Activity, TrendingUp, TrendingDown, Search, Zap } from 'lucide-react';
 import Chart from './Chart';
+import TradingViewPanel from './TradingViewPanel';
 import SignalCard from './SignalCard';
 import Chatbot from './Chatbot';
 import PerformancePanel from './PerformancePanel';
@@ -126,11 +127,50 @@ const TIMEFRAMES = [
   { label: 'Hold 1M', value: '1mo', interval: '1mo', range: 'max' },
 ];
 
+type ChartMode = 'native' | 'tradingview';
+
+function toTradingViewSymbol(symbol: string, marketType: string): string {
+  const raw = (symbol || '').toUpperCase().trim().replace(/\s+/g, '');
+  if (!raw) return 'NASDAQ:AAPL';
+
+  if (marketType === 'forex') {
+    const pair = raw.replace('/', '').replace('=X', '');
+    if (/^[A-Z]{6}$/.test(pair)) return `OANDA:${pair}`;
+  }
+
+  if (marketType === 'crypto') {
+    if (raw.includes('/')) {
+      const [base, quote] = raw.split('/');
+      if (base && quote) {
+        const normalizedQuote = quote === 'USD' ? 'USDT' : quote;
+        return `BINANCE:${base}${normalizedQuote}`;
+      }
+    }
+    if (raw.endsWith('-USD') || raw.endsWith('-USDT')) {
+      const [base, quote] = raw.split('-');
+      if (base) return `BINANCE:${base}${quote === 'USD' ? 'USDT' : quote}`;
+    }
+    if (/^[A-Z0-9]{2,12}USDT$/.test(raw)) return `BINANCE:${raw}`;
+  }
+
+  if (raw.endsWith('.JK')) {
+    return `IDX:${raw.replace('.JK', '')}`;
+  }
+
+  return `NASDAQ:${raw}`;
+}
+
+const DEFAULT_STUDIES = 'MACD@tv-basicstudies,RSI@tv-basicstudies,BB@tv-basicstudies,EMA@tv-basicstudies';
+
 export default function Dashboard() {
   const [symbol, setSymbol] = useState('AAPL');
   const [searchInput, setSearchInput] = useState('AAPL');
   const [resolvedSymbol, setResolvedSymbol] = useState('AAPL');
   const [marketType, setMarketType] = useState('stock');
+  const [chartMode, setChartMode] = useState<ChartMode>('tradingview');
+  const [tvTheme, setTvTheme] = useState<'dark' | 'light'>('dark');
+  const [tvSymbolOverride, setTvSymbolOverride] = useState('');
+  const [tvStudiesInput, setTvStudiesInput] = useState(DEFAULT_STUDIES);
   const [timeframe, setTimeframe] = useState<TimeframeConfig>(TIMEFRAMES[2]);
   const [data, setData] = useState<any[]>([]);
   const [quote, setQuote] = useState<any>(null);
@@ -202,6 +242,13 @@ export default function Dashboard() {
   const formatMetric = (value: number | null | undefined, digits = 2) => {
     return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '--';
   };
+
+  const autoTvSymbol = toTradingViewSymbol(resolvedSymbol || symbol, marketType);
+  const tradingViewSymbol = tvSymbolOverride.trim() ? tvSymbolOverride.trim().toUpperCase() : autoTvSymbol;
+  const tradingViewStudies = tvStudiesInput
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
 
   return (
     <div className="max-w-7xl mx-auto p-4 md:p-6 lg:p-8 grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -281,13 +328,81 @@ export default function Dashboard() {
             ))}
           </div>
 
+          <div className="mb-4 flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => setChartMode('tradingview')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold uppercase tracking-wide transition ${
+                chartMode === 'tradingview'
+                  ? 'bg-cyan-500 text-zinc-950'
+                  : 'bg-zinc-800/50 text-zinc-300 hover:bg-zinc-800'
+              }`}
+            >
+              TradingView Mode
+            </button>
+            <button
+              onClick={() => setChartMode('native')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold uppercase tracking-wide transition ${
+                chartMode === 'native'
+                  ? 'bg-emerald-500 text-zinc-950'
+                  : 'bg-zinc-800/50 text-zinc-300 hover:bg-zinc-800'
+              }`}
+            >
+              Native Mode
+            </button>
+            {chartMode === 'tradingview' && (
+              <button
+                onClick={() => setTvTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold uppercase tracking-wide bg-zinc-800/50 text-zinc-300 hover:bg-zinc-800 transition"
+              >
+                Theme: {tvTheme}
+              </button>
+            )}
+          </div>
+
+          {chartMode === 'tradingview' && (
+            <div className="mb-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+              <label className="text-xs text-zinc-400">
+                TradingView Symbol (opsional, override)
+                <input
+                  type="text"
+                  value={tvSymbolOverride}
+                  onChange={(e) => setTvSymbolOverride(e.target.value)}
+                  placeholder={autoTvSymbol}
+                  className="mt-1 w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-500/40"
+                />
+              </label>
+              <label className="text-xs text-zinc-400">
+                Indicator Pribadi (pisah koma)
+                <input
+                  type="text"
+                  value={tvStudiesInput}
+                  onChange={(e) => setTvStudiesInput(e.target.value)}
+                  placeholder="MACD@tv-basicstudies,RSI@tv-basicstudies"
+                  className="mt-1 w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-500/40"
+                />
+              </label>
+              <div className="md:col-span-2 text-[11px] text-zinc-500">
+                Mode ini pakai chart engine TradingView yang real-time style. Kamu bisa set indikator favorit sendiri via daftar studies.
+              </div>
+            </div>
+          )}
+
           <div className="h-[400px] w-full relative">
             {loading ? (
               <div className="absolute inset-0 flex items-center justify-center">
                 <div className="w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
               </div>
             ) : (
-              <Chart data={data} />
+              chartMode === 'tradingview' ? (
+                <TradingViewPanel
+                  symbol={tradingViewSymbol}
+                  interval={timeframe.interval}
+                  studies={tradingViewStudies}
+                  theme={tvTheme}
+                />
+              ) : (
+                <Chart data={data} />
+              )
             )}
           </div>
         </motion.div>
