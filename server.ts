@@ -827,22 +827,25 @@ function buildNewsQueries(symbol: SymbolInfo): string[] {
   const base = symbol.displaySymbol.replace("/", " ");
   if (symbol.marketType === "forex") {
     return [
-      `${base} forex central bank inflation`,
-      `${base} macro economic outlook`,
-      `${base} high impact economic calendar`,
+      `${base} forex fed ecb boj central bank inflation`,
+      `${base} global macro economic outlook risk sentiment`,
+      `${base} Bank Indonesia rupiah BI rate economic calendar`,
+      `${base} high impact economic calendar today`,
     ];
   }
   if (symbol.marketType === "crypto") {
     return [
-      `${base} crypto regulation ETF inflow`,
-      `${base} blockchain market sentiment`,
-      `${base} macro risk-on risk-off`,
+      `${base} crypto regulation sec etf flow`,
+      `${base} bitcoin ethereum macro liquidity risk-on risk-off`,
+      `${base} Indonesia Bappebti crypto regulation rupiah`,
+      `${base} global crypto market economic outlook`,
     ];
   }
   return [
-    `${base} stock earnings guidance analyst`,
-    `${base} industry macro outlook`,
-    `${base} federal reserve inflation outlook`,
+    `${base} stock earnings guidance federal reserve outlook`,
+    `${base} global equity macro outlook inflation rates`,
+    `${base} Indonesia stock market IDX IHSG ekonomi`,
+    `${base} Bank Indonesia economic policy and rupiah`,
   ];
 }
 
@@ -902,14 +905,38 @@ async function fetchMarketHeadlines(symbol: SymbolInfo): Promise<NewsHeadline[]>
     ),
   );
   const merged = mergeUniqueHeadlines(results.flat());
-  if (merged.length) return merged.slice(0, 18);
-  return fetchGoogleNewsHeadlines(`${symbol.displaySymbol} market outlook`, 8).catch(() => []);
+  if (merged.length >= 6) return merged.slice(0, 18);
+
+  const broadFallbackQueries =
+    symbol.marketType === "crypto"
+      ? [
+          "global crypto market news today",
+          "US macro inflation fed and crypto sentiment",
+          "Indonesia crypto regulation Bappebti market update",
+        ]
+      : symbol.marketType === "forex"
+        ? [
+            "global forex market moving news today",
+            "US dollar fed inflation rates update",
+            "Indonesia rupiah Bank Indonesia market update",
+          ]
+        : [
+            "global stock market macro news today",
+            "US economy fed inflation earnings updates",
+            "Indonesia stock market IHSG ekonomi terbaru",
+          ];
+
+  const fallbackResults = await Promise.all(
+    broadFallbackQueries.map((query) => fetchGoogleNewsHeadlines(query, 8).catch(() => [])),
+  );
+
+  return mergeUniqueHeadlines([...merged, ...fallbackResults.flat()]).slice(0, 18);
 }
 
 function inferImpactFromHeadline(title: string): "high" | "medium" | "low" {
   const text = title.toLowerCase();
-  if (/(fomc|interest rate|nfp|cpi|inflation|gdp|earnings|geopolitical|war|terror)/.test(text)) return "high";
-  if (/(pmi|jobless|manufacturing|guidance|regulation|sec|opec)/.test(text)) return "medium";
+  if (/(fomc|interest rate|nfp|cpi|inflation|gdp|earnings|geopolitical|war|terror|bank indonesia|bi rate|fed|ecb|boj|payroll|core pce)/.test(text)) return "high";
+  if (/(pmi|jobless|manufacturing|guidance|regulation|sec|opec|rupiah|idr|ihsg|idx|bappebti|fiscal|bond yield)/.test(text)) return "medium";
   return "low";
 }
 
@@ -928,6 +955,7 @@ function inferCurrencyFromText(text: string): string | undefined {
     [/\bsilver\b|\bxag\b/, "XAG"],
     [/\bbitcoin\b|\bbtc\b/, "BTC"],
     [/\bethereum\b|\beth\b/, "ETH"],
+    [/\bindonesia\b|\bjakarta\b|\brupiah\b|\bridr\b|\bbank indonesia\b|\bbi rate\b|\bihsg\b|\bidx\b/, "IDR"],
   ];
   for (const [pattern, currency] of map) {
     if (pattern.test(value)) return currency;
@@ -938,7 +966,7 @@ function inferCurrencyFromText(text: string): string | undefined {
 function buildCalendarFromHeadlines(headlines: NewsHeadline[]): CalendarItem[] {
   const tagged = headlines
     .filter((item) => isFreshIsoDate(item.publishedAt))
-    .filter((item) => /(fomc|interest rate|nfp|cpi|inflation|earnings|gdp|pmi|jobless|opec|ecb|boj|fed)/i.test(item.title))
+    .filter((item) => /(fomc|interest rate|nfp|cpi|inflation|earnings|gdp|pmi|jobless|opec|ecb|boj|fed|bank indonesia|bi rate|rupiah|idr|ihsg|idx|bappebti)/i.test(item.title))
     .slice(0, 10)
     .map((item) => ({
       event: item.title,
@@ -1041,6 +1069,9 @@ function parseForexFactoryCalendar(xml: string): CalendarItem[] {
 
 function getSymbolCurrencies(symbol: SymbolInfo): string[] {
   const display = symbol.displaySymbol.toUpperCase();
+  if (display.endsWith(".JK")) {
+    return ["IDR", "USD"];
+  }
   if (symbol.marketType === "forex") {
     const pair = display.replace("=X", "").replace("/", "");
     if (pair.length >= 6) return [pair.slice(0, 3), pair.slice(3, 6)];
@@ -1088,7 +1119,13 @@ async function fetchEconomicCalendar(symbol: SymbolInfo): Promise<CalendarItem[]
   const cached = getCached<CalendarItem[]>(cacheKey);
   if (cached) return cached;
 
-  const [forexFactoryEvents, fallbackHeadlines] = await Promise.all([
+  const fallbackQueries = [
+    "US economic calendar today fed cpi nfp",
+    "global economic calendar today central bank",
+    "Indonesia economic calendar Bank Indonesia rupiah inflasi",
+  ];
+
+  const [forexFactoryEvents, fallbackResults] = await Promise.all([
     withTimeout(
       fetch("https://nfs.faireconomy.media/ff_calendar_thisweek.xml").then(async (resp) => {
         if (!resp.ok) throw new Error(`ForexFactory calendar failed (${resp.status})`);
@@ -1099,19 +1136,21 @@ async function fetchEconomicCalendar(symbol: SymbolInfo): Promise<CalendarItem[]
     )
       .then((xml) => parseForexFactoryCalendar(xml))
       .catch(() => []),
-    fetchGoogleNewsHeadlines("US economic calendar today", 12).catch(() => []),
+    Promise.all(fallbackQueries.map((query) => fetchGoogleNewsHeadlines(query, 10).catch(() => []))),
   ]);
 
   const symbolCurrencies = getSymbolCurrencies(symbol);
+  const fallbackHeadlines = mergeUniqueHeadlines(fallbackResults.flat());
   const headlineCalendar = buildCalendarFromHeadlines(fallbackHeadlines).map((item) => ({
     ...item,
     source: `${item.source} (News)`,
   }));
 
+  const allowedCurrencies = new Set([...symbolCurrencies, "USD", "IDR"]);
   const merged = mergeCalendarItems([...forexFactoryEvents, ...headlineCalendar])
     .filter((item) => {
       if (!item.currency) return item.impact === "high";
-      return symbolCurrencies.includes(item.currency.toUpperCase());
+      return allowedCurrencies.has(item.currency.toUpperCase());
     })
     .slice(0, 20);
 
