@@ -421,9 +421,6 @@ async function getYahooFinanceClient(): Promise<YahooFinanceClient> {
 
       for (const candidate of candidates) {
         if (!candidate) continue;
-        if (typeof candidate.chart === "function" && typeof candidate.quote === "function") {
-          return candidate as YahooFinanceClient;
-        }
         if (typeof candidate === "function") {
           try {
             const instance = new candidate();
@@ -433,6 +430,9 @@ async function getYahooFinanceClient(): Promise<YahooFinanceClient> {
           } catch {
             // ignore and try next candidate shape
           }
+        }
+        if (typeof candidate.chart === "function" && typeof candidate.quote === "function") {
+          return candidate as YahooFinanceClient;
         }
       }
 
