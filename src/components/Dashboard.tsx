@@ -4,7 +4,7 @@ import { Activity, TrendingUp, TrendingDown, Search, Zap } from 'lucide-react';
 import Chart from './Chart';
 import TradingViewPanel from './TradingViewPanel';
 import SignalCard from './SignalCard';
-import Chatbot from './Chatbot';
+import FloatingChat from './FloatingChat';
 import PerformancePanel from './PerformancePanel';
 
 type Signal = 'BUY' | 'SELL' | 'HOLD';
@@ -118,6 +118,39 @@ interface SnapshotResponse {
   analysis: AnalysisResponse;
 }
 
+interface IntelHeadline {
+  title: string;
+  link: string;
+  source: string;
+  publishedAt: string;
+  sentiment: 'positive' | 'negative' | 'neutral';
+  query: string;
+}
+
+interface CalendarEvent {
+  event: string;
+  impact: 'high' | 'medium' | 'low';
+  timestamp: string;
+  source: string;
+}
+
+interface MarketIntelResponse {
+  symbol: string;
+  marketType: string;
+  headlines: IntelHeadline[];
+  calendar: CalendarEvent[];
+  updatedAt: string;
+}
+
+interface GeopoliticalEvent {
+  title: string;
+  region: string;
+  riskLevel: 'high' | 'medium' | 'low';
+  publishedAt: string;
+  source: string;
+  link: string;
+}
+
 const TIMEFRAMES = [
   { label: 'Scalp 5m', value: '5m', interval: '5m', range: '5d' },
   { label: 'Day 15m', value: '15m', interval: '15m', range: '1mo' },
@@ -175,6 +208,10 @@ export default function Dashboard() {
   const [data, setData] = useState<any[]>([]);
   const [quote, setQuote] = useState<any>(null);
   const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null);
+  const [intel, setIntel] = useState<MarketIntelResponse | null>(null);
+  const [geoEvents, setGeoEvents] = useState<GeopoliticalEvent[]>([]);
+  const [intelLoading, setIntelLoading] = useState(false);
+  const [geoLoading, setGeoLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -212,15 +249,54 @@ export default function Dashboard() {
     }
   };
 
+  const fetchIntel = async () => {
+    setIntelLoading(true);
+    try {
+      const response = await fetch(`/api/intel/${encodeURIComponent(symbol)}`);
+      if (!response.ok) throw new Error(`Intel request failed (${response.status})`);
+      const payload: MarketIntelResponse = await response.json();
+      setIntel(payload);
+    } catch (intelError) {
+      console.error('Intel fetch error:', intelError);
+    } finally {
+      setIntelLoading(false);
+    }
+  };
+
+  const fetchGeopolitics = async () => {
+    setGeoLoading(true);
+    try {
+      const response = await fetch('/api/geopolitics');
+      if (!response.ok) throw new Error(`Geopolitics request failed (${response.status})`);
+      const payload = await response.json();
+      setGeoEvents(Array.isArray(payload?.events) ? payload.events : []);
+    } catch (geoError) {
+      console.error('Geopolitics fetch error:', geoError);
+    } finally {
+      setGeoLoading(false);
+    }
+  };
+
   useEffect(() => {
     fetchData(true);
+    fetchIntel();
 
     const intervalId = setInterval(() => {
       fetchData(false);
+      fetchIntel();
     }, 20000);
 
     return () => clearInterval(intervalId);
   }, [symbol, timeframe.value]);
+
+  useEffect(() => {
+    fetchGeopolitics();
+    const intervalId = setInterval(() => {
+      fetchGeopolitics();
+    }, 60_000);
+
+    return () => clearInterval(intervalId);
+  }, []);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -251,8 +327,8 @@ export default function Dashboard() {
     .filter(Boolean);
 
   return (
-    <div className="max-w-7xl mx-auto p-4 md:p-6 lg:p-8 grid grid-cols-1 lg:grid-cols-3 gap-6">
-      <div className="lg:col-span-2 space-y-6">
+    <div className="max-w-[1700px] mx-auto p-4 md:p-6 lg:p-8 grid grid-cols-1 lg:grid-cols-4 gap-6">
+      <div className="lg:col-span-3 space-y-6">
         <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
           <div>
             <h1 className="text-3xl font-bold tracking-tight text-white flex items-center gap-2">
@@ -387,7 +463,7 @@ export default function Dashboard() {
             </div>
           )}
 
-          <div className="h-[400px] w-full relative">
+          <div className={`w-full relative ${chartMode === 'tradingview' ? 'h-[680px]' : 'h-[460px]'}`}>
             {loading ? (
               <div className="absolute inset-0 flex items-center justify-center">
                 <div className="w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
@@ -510,17 +586,144 @@ export default function Dashboard() {
         )}
 
         <PerformancePanel backtest={analysis?.backtest} risk={analysis?.risk} />
+
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-zinc-900/50 border border-zinc-800/50 rounded-2xl p-5 backdrop-blur-sm"
+        >
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm uppercase tracking-wider text-zinc-400">Geo Conflict Monitor</h3>
+            <span className="text-xs text-zinc-500">Live feed</span>
+          </div>
+
+          {geoLoading && geoEvents.length === 0 ? (
+            <div className="text-sm text-zinc-500">Loading geopolitical updates...</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-zinc-500 border-b border-zinc-800">
+                    <th className="text-left py-2 pr-3">Time</th>
+                    <th className="text-left py-2 pr-3">Region</th>
+                    <th className="text-left py-2 pr-3">Risk</th>
+                    <th className="text-left py-2">Headline</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {geoEvents.slice(0, 14).map((event, index) => (
+                    <tr key={`${event.link}-${index}`} className="border-b border-zinc-900/70">
+                      <td className="py-2 pr-3 text-zinc-400 whitespace-nowrap">{new Date(event.publishedAt).toLocaleString()}</td>
+                      <td className="py-2 pr-3 text-zinc-300 uppercase">{event.region}</td>
+                      <td className="py-2 pr-3">
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                          event.riskLevel === 'high'
+                            ? 'bg-rose-500/20 text-rose-300'
+                            : event.riskLevel === 'medium'
+                              ? 'bg-amber-500/20 text-amber-300'
+                              : 'bg-emerald-500/20 text-emerald-300'
+                        }`}>
+                          {event.riskLevel}
+                        </span>
+                      </td>
+                      <td className="py-2 text-zinc-200">
+                        <a
+                          href={event.link}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="hover:text-cyan-300 transition-colors"
+                        >
+                          {event.title}
+                        </a>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </motion.div>
       </div>
 
-      <div className="lg:col-span-1 h-[800px] lg:h-auto">
-        <Chatbot
-          symbol={resolvedSymbol}
-          quote={quote}
-          signal={signal}
-          timeframe={timeframe.label}
-          analysis={analysis}
-        />
+      <div className="lg:col-span-1 space-y-4">
+        <div className="bg-zinc-900/50 border border-zinc-800/50 rounded-2xl p-4 backdrop-blur-sm">
+          <h3 className="text-sm uppercase tracking-wider text-zinc-400 mb-3">Fundamental & News</h3>
+
+          <div className="mb-4 rounded-xl border border-zinc-800 bg-zinc-900 p-3">
+            <div className="text-xs text-zinc-500 mb-1">Pair Active</div>
+            <div className="text-white font-semibold">{resolvedSymbol}</div>
+            <div className="text-xs text-zinc-400 uppercase">{marketType}</div>
+          </div>
+
+          <div className="mb-4 rounded-xl border border-zinc-800 bg-zinc-900 p-3">
+            <div className="text-xs text-zinc-500 mb-1">Prediction Snapshot</div>
+            <div className="text-sm text-white">
+              Signal <span className="font-bold">{signal}</span> | Confidence {formatMetric(analysis?.confidence, 0)}%
+            </div>
+            <div className="text-xs text-zinc-400 mt-1">
+              Entry {formatMetric(analysis?.entry, 4)} | TP1 {formatMetric(analysis?.takeProfit1, 4)} | SL {formatMetric(analysis?.stopLoss, 4)}
+            </div>
+          </div>
+
+          <div className="mb-4">
+            <div className="text-xs text-zinc-500 mb-2">News Schedule / Economic Triggers</div>
+            <div className="space-y-2">
+              {(intel?.calendar ?? []).slice(0, 6).map((event, index) => (
+                <div key={`${event.event}-${index}`} className="rounded-lg border border-zinc-800 bg-zinc-900 p-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-zinc-200 text-xs">{event.event}</span>
+                    <span className={`text-[10px] uppercase font-bold ${
+                      event.impact === 'high'
+                        ? 'text-rose-400'
+                        : event.impact === 'medium'
+                          ? 'text-amber-400'
+                          : 'text-emerald-400'
+                    }`}>
+                      {event.impact}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-zinc-500 mt-1">{new Date(event.timestamp).toLocaleString()}</div>
+                </div>
+              ))}
+              {!intelLoading && (!intel || intel.calendar.length === 0) && (
+                <div className="text-xs text-zinc-500">No scheduled catalyst detected for this pair yet.</div>
+              )}
+            </div>
+          </div>
+
+          <div>
+            <div className="text-xs text-zinc-500 mb-2">Latest Fundamental Headlines</div>
+            <div className="space-y-2">
+              {(intel?.headlines ?? []).slice(0, 10).map((headline, index) => (
+                <a
+                  key={`${headline.link}-${index}`}
+                  href={headline.link}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="block rounded-lg border border-zinc-800 bg-zinc-900 p-2 hover:border-cyan-500/40 transition-colors"
+                >
+                  <div className="text-xs text-zinc-200 leading-snug">{headline.title}</div>
+                  <div className="mt-1 flex items-center justify-between text-[10px] text-zinc-500">
+                    <span>{headline.source}</span>
+                    <span>{new Date(headline.publishedAt).toLocaleString()}</span>
+                  </div>
+                </a>
+              ))}
+              {intelLoading && (
+                <div className="text-xs text-zinc-500">Loading symbol-specific fundamental news...</div>
+              )}
+            </div>
+          </div>
+        </div>
       </div>
+
+      <FloatingChat
+        symbol={resolvedSymbol}
+        quote={quote}
+        signal={signal}
+        timeframe={timeframe.label}
+        analysis={analysis}
+      />
     </div>
   );
 }

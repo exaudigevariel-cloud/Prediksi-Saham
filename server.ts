@@ -22,6 +22,31 @@ interface SymbolInfo {
   marketType: MarketType;
 }
 
+interface NewsHeadline {
+  title: string;
+  link: string;
+  source: string;
+  publishedAt: string;
+  sentiment: "positive" | "negative" | "neutral";
+  query: string;
+}
+
+interface CalendarItem {
+  event: string;
+  impact: "high" | "medium" | "low";
+  timestamp: string;
+  source: string;
+}
+
+interface GeopoliticalEvent {
+  title: string;
+  region: string;
+  riskLevel: "high" | "medium" | "low";
+  publishedAt: string;
+  source: string;
+  link: string;
+}
+
 interface StrategyVote {
   name: StrategyName;
   score: number;
@@ -207,6 +232,7 @@ const PORT = Number(process.env.PORT ?? 3000);
 const REQUEST_TIMEOUT_MS = 8_000;
 const DEFAULT_ACCOUNT_SIZE = 10_000;
 const MIN_CANDLES_FOR_MODEL = 80;
+const NEWS_CACHE_TTL_MS = 180_000;
 
 const VALID_INTERVALS = new Set([
   "1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo",
@@ -221,6 +247,7 @@ type YahooFinanceClient = {
 };
 
 let yahooFinanceClientPromise: Promise<YahooFinanceClient> | null = null;
+const runtimeCache = new Map<string, { value: unknown; expiresAt: number }>();
 
 interface AppBuildOptions {
   includeViteMiddleware?: boolean;
@@ -330,6 +357,37 @@ export async function createApp(options: AppBuildOptions = {}) {
     } catch (error: any) {
       console.error("Error building snapshot:", error);
       res.status(502).json({ error: error.message ?? "Failed to build market snapshot" });
+    }
+  });
+
+  app.get("/api/intel/:symbol", async (req, res) => {
+    try {
+      const symbolInfo = normalizeSymbol(req.params.symbol);
+      const headlines = await fetchMarketHeadlines(symbolInfo);
+      const calendar = buildCalendarFromHeadlines(headlines);
+      res.json({
+        symbol: symbolInfo.displaySymbol,
+        marketType: symbolInfo.marketType,
+        headlines,
+        calendar,
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error: any) {
+      console.error("Error fetching market intel:", error);
+      res.status(502).json({ error: error.message ?? "Failed to fetch market intelligence feed" });
+    }
+  });
+
+  app.get("/api/geopolitics", async (_req, res) => {
+    try {
+      const events = await fetchGeopoliticalEvents();
+      res.json({
+        events,
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error: any) {
+      console.error("Error fetching geopolitical monitor:", error);
+      res.status(502).json({ error: error.message ?? "Failed to fetch geopolitical monitor feed" });
     }
   });
 
@@ -569,6 +627,201 @@ function normalizeSymbol(input: string): SymbolInfo {
     querySymbol: raw,
     marketType: "stock",
   };
+}
+
+function getCached<T>(key: string): T | undefined {
+  const cached = runtimeCache.get(key);
+  if (!cached) return undefined;
+  if (Date.now() >= cached.expiresAt) {
+    runtimeCache.delete(key);
+    return undefined;
+  }
+  return cached.value as T;
+}
+
+function setCached<T>(key: string, value: T, ttlMs = NEWS_CACHE_TTL_MS): void {
+  runtimeCache.set(key, { value, expiresAt: Date.now() + ttlMs });
+}
+
+function decodeXmlEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'");
+}
+
+function extractTag(block: string, tag: string): string {
+  const match = block.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, "i"));
+  return match?.[1]?.trim() ?? "";
+}
+
+function parseRssItems(xml: string): Array<{ title: string; link: string; source: string; pubDate: string }> {
+  const items: Array<{ title: string; link: string; source: string; pubDate: string }> = [];
+  const regex = /<item>([\s\S]*?)<\/item>/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(xml)) !== null) {
+    const block = match[1];
+    const title = decodeXmlEntities(extractTag(block, "title")).replace(/\s+/g, " ").trim();
+    const link = decodeXmlEntities(extractTag(block, "link"));
+    const source = decodeXmlEntities(extractTag(block, "source")) || "News";
+    const pubDate = extractTag(block, "pubDate");
+    if (!title || !link) continue;
+    items.push({ title, link, source, pubDate });
+  }
+
+  return items;
+}
+
+function inferNewsSentiment(title: string): "positive" | "negative" | "neutral" {
+  const text = title.toLowerCase();
+  const positive = ["rally", "surge", "beat", "upgrade", "bullish", "growth", "record high", "easing", "inflow"];
+  const negative = ["war", "conflict", "attack", "terror", "downgrade", "miss", "selloff", "crash", "sanction", "risk"];
+  if (positive.some((word) => text.includes(word))) return "positive";
+  if (negative.some((word) => text.includes(word))) return "negative";
+  return "neutral";
+}
+
+function buildNewsQueries(symbol: SymbolInfo): string[] {
+  const base = symbol.displaySymbol.replace("/", " ");
+  if (symbol.marketType === "forex") {
+    return [
+      `${base} forex central bank inflation`,
+      `${base} macro economic outlook`,
+    ];
+  }
+  if (symbol.marketType === "crypto") {
+    return [
+      `${base} crypto regulation ETF inflow`,
+      `${base} blockchain market sentiment`,
+    ];
+  }
+  return [
+    `${base} stock earnings guidance analyst`,
+    `${base} industry macro outlook`,
+  ];
+}
+
+async function fetchGoogleNewsHeadlines(query: string, limit = 8): Promise<NewsHeadline[]> {
+  const cacheKey = `rss:${query}:${limit}`;
+  const cached = getCached<NewsHeadline[]>(cacheKey);
+  if (cached) return cached;
+
+  const url = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
+  const xml = await withTimeout(
+    fetch(url).then(async (resp) => {
+      if (!resp.ok) throw new Error(`Google News RSS request failed (${resp.status})`);
+      return resp.text();
+    }),
+    REQUEST_TIMEOUT_MS,
+    "Google News RSS timeout",
+  );
+
+  const headlines = parseRssItems(xml).slice(0, limit).map((item) => ({
+    title: item.title,
+    link: item.link,
+    source: item.source,
+    publishedAt: Number.isFinite(new Date(item.pubDate).getTime()) ? new Date(item.pubDate).toISOString() : new Date().toISOString(),
+    sentiment: inferNewsSentiment(item.title),
+    query,
+  }));
+
+  setCached(cacheKey, headlines);
+  return headlines;
+}
+
+function mergeUniqueHeadlines(headlines: NewsHeadline[]): NewsHeadline[] {
+  const seen = new Set<string>();
+  const merged: NewsHeadline[] = [];
+  for (const headline of headlines) {
+    const key = `${headline.link}|${headline.title}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(headline);
+  }
+  return merged.sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
+}
+
+async function fetchMarketHeadlines(symbol: SymbolInfo): Promise<NewsHeadline[]> {
+  const queries = buildNewsQueries(symbol);
+  const results = await Promise.all(
+    queries.map((query) =>
+      fetchGoogleNewsHeadlines(query, 10).catch(() => []),
+    ),
+  );
+  return mergeUniqueHeadlines(results.flat()).slice(0, 18);
+}
+
+function inferImpactFromHeadline(title: string): "high" | "medium" | "low" {
+  const text = title.toLowerCase();
+  if (/(fomc|interest rate|nfp|cpi|inflation|gdp|earnings|geopolitical|war|terror)/.test(text)) return "high";
+  if (/(pmi|jobless|manufacturing|guidance|regulation|sec|opec)/.test(text)) return "medium";
+  return "low";
+}
+
+function buildCalendarFromHeadlines(headlines: NewsHeadline[]): CalendarItem[] {
+  const tagged = headlines
+    .filter((item) => /(fomc|interest rate|nfp|cpi|inflation|earnings|gdp|pmi|jobless|opec|ecb|boj|fed)/i.test(item.title))
+    .slice(0, 10)
+    .map((item) => ({
+      event: item.title,
+      impact: inferImpactFromHeadline(item.title),
+      timestamp: item.publishedAt,
+      source: item.source,
+    }));
+
+  return tagged.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+}
+
+function classifyRegion(title: string): string {
+  const text = title.toLowerCase();
+  if (/(ukraine|russia|europe)/.test(text)) return "europe";
+  if (/(gaza|israel|iran|middle east|yemen|syria)/.test(text)) return "middle-east";
+  if (/(papua|opm|indonesia)/.test(text)) return "indonesia";
+  if (/(china|taiwan|south china sea|korea|japan)/.test(text)) return "asia";
+  if (/(africa|sahel|sudan)/.test(text)) return "africa";
+  if (/(usa|united states|mexico|canada)/.test(text)) return "americas";
+  return "global";
+}
+
+function classifyRiskLevel(title: string): "high" | "medium" | "low" {
+  const text = title.toLowerCase();
+  if (/(war|missile|attack|bomb|terror|hostage|strike|invasion|military escalation)/.test(text)) return "high";
+  if (/(conflict|sanction|protest|clash|security alert)/.test(text)) return "medium";
+  return "low";
+}
+
+async function fetchGeopoliticalEvents(): Promise<GeopoliticalEvent[]> {
+  const cacheKey = "geo:events";
+  const cached = getCached<GeopoliticalEvent[]>(cacheKey);
+  if (cached) return cached;
+
+  const queries = [
+    "war conflict escalation",
+    "terrorism attack security alert",
+    "Papua OPM conflict",
+    "military sanctions geopolitical risk",
+  ];
+
+  const results = await Promise.all(
+    queries.map((query) => fetchGoogleNewsHeadlines(query, 10).catch(() => [])),
+  );
+
+  const events: GeopoliticalEvent[] = mergeUniqueHeadlines(results.flat())
+    .slice(0, 28)
+    .map((item) => ({
+      title: item.title,
+      region: classifyRegion(item.title),
+      riskLevel: classifyRiskLevel(item.title),
+      publishedAt: item.publishedAt,
+      source: item.source,
+      link: item.link,
+    }));
+
+  setCached(cacheKey, events);
+  return events;
 }
 
 function getPeriod1(range: string): string {
