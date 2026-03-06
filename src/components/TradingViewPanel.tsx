@@ -11,7 +11,7 @@ declare global {
 interface TradingViewPanelProps {
   symbol: string;
   interval: string;
-  studies: string[];
+  studiesCsv: string;
   theme?: 'dark' | 'light';
 }
 
@@ -63,9 +63,17 @@ function toTradingViewInterval(interval: string): string {
   return map[normalized] ?? '60';
 }
 
-export default function TradingViewPanel({ symbol, interval, studies, theme = 'dark' }: TradingViewPanelProps) {
+export default function TradingViewPanel({ symbol, interval, studiesCsv, theme = 'dark' }: TradingViewPanelProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const studies = useMemo(
+    () =>
+      studiesCsv
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean),
+    [studiesCsv],
+  );
 
   const containerId = useMemo(
     () => `tv-widget-${symbol.replace(/[^A-Z0-9:_-]/gi, '').toLowerCase()}-${interval}`,
@@ -112,7 +120,7 @@ export default function TradingViewPanel({ symbol, interval, studies, theme = 'd
     return () => {
       mounted = false;
     };
-  }, [containerId, interval, studies, symbol, theme]);
+  }, [containerId, interval, studiesCsv, symbol, theme]);
 
   if (loadError) {
     return (

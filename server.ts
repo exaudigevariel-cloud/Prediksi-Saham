@@ -47,6 +47,44 @@ interface GeopoliticalEvent {
   link: string;
 }
 
+interface InstitutionalActor {
+  organization: string;
+  source: "institutionOwnership" | "fundOwnership";
+  side: "BUY" | "SELL" | "HOLD";
+  pctHeld: number | null;
+  pctChange: number | null;
+  position: number | null;
+  value: number | null;
+  estimatedFlowShares: number | null;
+  reportDate: string;
+}
+
+interface InstitutionalSummary {
+  totalTracked: number;
+  buyActors: number;
+  sellActors: number;
+  holdActors: number;
+  buyFlowShares: number;
+  sellFlowShares: number;
+  dominantSide: "BUY" | "SELL" | "NEUTRAL";
+  dominanceScore: number;
+  topBuyer: string | null;
+  topSeller: string | null;
+}
+
+interface InstitutionalResponse {
+  symbol: string;
+  marketType: MarketType;
+  supported: boolean;
+  note?: string;
+  updatedAt: string;
+  insiderNetShares: number | null;
+  insiderBuyShares: number | null;
+  insiderSellShares: number | null;
+  summary: InstitutionalSummary;
+  rows: InstitutionalActor[];
+}
+
 interface StrategyVote {
   name: StrategyName;
   score: number;
@@ -245,6 +283,7 @@ const METAL_CODES = new Set(["XAU", "XAG", "XPT", "XPD"]);
 type YahooFinanceClient = {
   chart: (symbol: string, options: any) => Promise<any>;
   quote: (symbol: string) => Promise<any>;
+  quoteSummary: (symbol: string, options: any) => Promise<any>;
 };
 
 let yahooFinanceClientPromise: Promise<YahooFinanceClient> | null = null;
@@ -358,6 +397,17 @@ export async function createApp(options: AppBuildOptions = {}) {
     } catch (error: any) {
       console.error("Error building snapshot:", error);
       res.status(502).json({ error: error.message ?? "Failed to build market snapshot" });
+    }
+  });
+
+  app.get("/api/institutional/:symbol", async (req, res) => {
+    try {
+      const symbolInfo = normalizeSymbol(req.params.symbol);
+      const institutional = await fetchInstitutionalFlow(symbolInfo);
+      res.json(institutional);
+    } catch (error: any) {
+      console.error("Error fetching institutional flow:", error);
+      res.status(502).json({ error: error.message ?? "Failed to fetch institutional flow data" });
     }
   });
 
@@ -483,14 +533,22 @@ async function getYahooFinanceClient(): Promise<YahooFinanceClient> {
         if (typeof candidate === "function") {
           try {
             const instance = new candidate();
-            if (typeof instance.chart === "function" && typeof instance.quote === "function") {
+            if (
+              typeof instance.chart === "function" &&
+              typeof instance.quote === "function" &&
+              typeof instance.quoteSummary === "function"
+            ) {
               return instance as YahooFinanceClient;
             }
           } catch {
             // ignore and try next candidate shape
           }
         }
-        if (typeof candidate.chart === "function" && typeof candidate.quote === "function") {
+        if (
+          typeof candidate.chart === "function" &&
+          typeof candidate.quote === "function" &&
+          typeof candidate.quoteSummary === "function"
+        ) {
           return candidate as YahooFinanceClient;
         }
       }
@@ -849,6 +907,196 @@ async function fetchGeopoliticalEvents(): Promise<GeopoliticalEvent[]> {
 
   setCached(cacheKey, events);
   return events;
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function emptyInstitutionalSummary(): InstitutionalSummary {
+  return {
+    totalTracked: 0,
+    buyActors: 0,
+    sellActors: 0,
+    holdActors: 0,
+    buyFlowShares: 0,
+    sellFlowShares: 0,
+    dominantSide: "NEUTRAL",
+    dominanceScore: 50,
+    topBuyer: null,
+    topSeller: null,
+  };
+}
+
+function buildInstitutionalResponse(
+  symbol: SymbolInfo,
+  overrides: Partial<InstitutionalResponse>,
+): InstitutionalResponse {
+  return {
+    symbol: symbol.displaySymbol,
+    marketType: symbol.marketType,
+    supported: true,
+    updatedAt: new Date().toISOString(),
+    insiderNetShares: null,
+    insiderBuyShares: null,
+    insiderSellShares: null,
+    summary: emptyInstitutionalSummary(),
+    rows: [],
+    ...overrides,
+  };
+}
+
+function normalizeInstitutionalRows(
+  source: "institutionOwnership" | "fundOwnership",
+  rows: any[],
+): InstitutionalActor[] {
+  return rows
+    .map((item: any): InstitutionalActor | null => {
+      const organization = typeof item?.organization === "string" ? item.organization.trim() : "";
+      if (!organization) return null;
+
+      const pctHeldRaw = toFiniteNumber(item?.pctHeld);
+      const pctHeld = pctHeldRaw === null ? null : pctHeldRaw * 100;
+      const pctChange = toFiniteNumber(item?.pctChange);
+      const position = toFiniteNumber(item?.position);
+      const value = toFiniteNumber(item?.value);
+      const estimatedFlowShares =
+        pctChange !== null && position !== null ? position * pctChange : null;
+
+      let side: "BUY" | "SELL" | "HOLD" = "HOLD";
+      if (estimatedFlowShares !== null) {
+        if (estimatedFlowShares > 0) side = "BUY";
+        if (estimatedFlowShares < 0) side = "SELL";
+      }
+
+      const reportDateRaw = item?.reportDate ? new Date(item.reportDate) : null;
+      const reportDate =
+        reportDateRaw && Number.isFinite(reportDateRaw.getTime())
+          ? reportDateRaw.toISOString()
+          : new Date().toISOString();
+
+      return {
+        organization,
+        source,
+        side,
+        pctHeld,
+        pctChange,
+        position,
+        value,
+        estimatedFlowShares,
+        reportDate,
+      };
+    })
+    .filter((row): row is InstitutionalActor => Boolean(row))
+    .sort((a, b) => {
+      const av = Math.abs(a.estimatedFlowShares ?? 0);
+      const bv = Math.abs(b.estimatedFlowShares ?? 0);
+      return bv - av;
+    });
+}
+
+function aggregateInstitutionalSummary(rows: InstitutionalActor[]): InstitutionalSummary {
+  if (!rows.length) return emptyInstitutionalSummary();
+
+  const buyRows = rows.filter((row) => row.side === "BUY");
+  const sellRows = rows.filter((row) => row.side === "SELL");
+  const holdRows = rows.filter((row) => row.side === "HOLD");
+
+  const buyFlowShares = buyRows.reduce((sum, row) => sum + Math.max(row.estimatedFlowShares ?? 0, 0), 0);
+  const sellFlowShares = sellRows.reduce((sum, row) => sum + Math.abs(Math.min(row.estimatedFlowShares ?? 0, 0)), 0);
+  const totalFlow = buyFlowShares + sellFlowShares;
+
+  let dominantSide: "BUY" | "SELL" | "NEUTRAL" = "NEUTRAL";
+  if (totalFlow > 0) {
+    dominantSide = buyFlowShares > sellFlowShares ? "BUY" : buyFlowShares < sellFlowShares ? "SELL" : "NEUTRAL";
+  }
+
+  const topBuyer = buyRows.length
+    ? buyRows.reduce((max, row) => ((row.estimatedFlowShares ?? 0) > (max.estimatedFlowShares ?? 0) ? row : max), buyRows[0]).organization
+    : null;
+  const topSeller = sellRows.length
+    ? sellRows.reduce((max, row) => (Math.abs(row.estimatedFlowShares ?? 0) > Math.abs(max.estimatedFlowShares ?? 0) ? row : max), sellRows[0]).organization
+    : null;
+
+  return {
+    totalTracked: rows.length,
+    buyActors: buyRows.length,
+    sellActors: sellRows.length,
+    holdActors: holdRows.length,
+    buyFlowShares: round(buyFlowShares, 0),
+    sellFlowShares: round(sellFlowShares, 0),
+    dominantSide,
+    dominanceScore: round(totalFlow > 0 ? (Math.max(buyFlowShares, sellFlowShares) / totalFlow) * 100 : 50, 2),
+    topBuyer,
+    topSeller,
+  };
+}
+
+async function fetchInstitutionalFlow(symbol: SymbolInfo): Promise<InstitutionalResponse> {
+  if (symbol.marketType !== "stock") {
+    return buildInstitutionalResponse(symbol, {
+      supported: false,
+      note: "Institutional ownership feed is available only for stock symbols.",
+    });
+  }
+
+  const cacheKey = `institutional:${symbol.querySymbol}`;
+  const cached = getCached<InstitutionalResponse>(cacheKey);
+  if (cached) return cached;
+
+  const yahooFinance = await getYahooFinanceClient();
+  const modules = [
+    "institutionOwnership",
+    "fundOwnership",
+    "netSharePurchaseActivity",
+    "majorHoldersBreakdown",
+  ];
+
+  try {
+    const summaryData = await withTimeout(
+      yahooFinance.quoteSummary(symbol.querySymbol, { modules }),
+      REQUEST_TIMEOUT_MS,
+      "Yahoo Finance institutional data timeout",
+    );
+
+    const institutionRows = normalizeInstitutionalRows(
+      "institutionOwnership",
+      Array.isArray(summaryData?.institutionOwnership?.ownershipList)
+        ? summaryData.institutionOwnership.ownershipList
+        : [],
+    );
+    const fundRows = normalizeInstitutionalRows(
+      "fundOwnership",
+      Array.isArray(summaryData?.fundOwnership?.ownershipList)
+        ? summaryData.fundOwnership.ownershipList
+        : [],
+    );
+
+    const mergedRows = [...institutionRows, ...fundRows]
+      .slice(0, 40)
+      .sort((a, b) => Math.abs(b.estimatedFlowShares ?? 0) - Math.abs(a.estimatedFlowShares ?? 0));
+
+    const activity = summaryData?.netSharePurchaseActivity ?? {};
+    const result = buildInstitutionalResponse(symbol, {
+      insiderNetShares: toFiniteNumber(activity.netInfoShares),
+      insiderBuyShares: toFiniteNumber(activity.buyInfoShares),
+      insiderSellShares: toFiniteNumber(activity.sellInfoShares),
+      summary: aggregateInstitutionalSummary(mergedRows),
+      rows: mergedRows,
+      updatedAt: new Date().toISOString(),
+      supported: mergedRows.length > 0,
+      note: mergedRows.length ? undefined : "No institutional ownership rows found for this symbol.",
+    });
+
+    setCached(cacheKey, result, NEWS_CACHE_TTL_MS);
+    return result;
+  } catch (error: any) {
+    return buildInstitutionalResponse(symbol, {
+      supported: false,
+      note: error?.message ?? "Institutional feed unavailable for this symbol.",
+    });
+  }
 }
 
 function getPeriod1(range: string): string {

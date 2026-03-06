@@ -49,16 +49,65 @@ interface RiskPlan {
   notes: string[];
 }
 
+interface InstitutionalRow {
+  organization: string;
+  source: 'institutionOwnership' | 'fundOwnership';
+  side: 'BUY' | 'SELL' | 'HOLD';
+  pctHeld: number | null;
+  pctChange: number | null;
+  position: number | null;
+  value: number | null;
+  estimatedFlowShares: number | null;
+  reportDate: string;
+}
+
+interface InstitutionalSummary {
+  totalTracked: number;
+  buyActors: number;
+  sellActors: number;
+  holdActors: number;
+  buyFlowShares: number;
+  sellFlowShares: number;
+  dominantSide: 'BUY' | 'SELL' | 'NEUTRAL';
+  dominanceScore: number;
+  topBuyer: string | null;
+  topSeller: string | null;
+}
+
+interface InstitutionalResponse {
+  symbol: string;
+  marketType: string;
+  supported: boolean;
+  note?: string;
+  updatedAt: string;
+  insiderNetShares: number | null;
+  insiderBuyShares: number | null;
+  insiderSellShares: number | null;
+  summary: InstitutionalSummary;
+  rows: InstitutionalRow[];
+}
+
 interface PerformancePanelProps {
   backtest?: BacktestMetrics | null;
   risk?: RiskPlan | null;
+  institutional?: InstitutionalResponse | null;
+  institutionalLoading?: boolean;
 }
 
 function fmt(value: number | null | undefined, digits = 2) {
   return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '--';
 }
 
-export default function PerformancePanel({ backtest, risk }: PerformancePanelProps) {
+function compact(value: number | null | undefined): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '--';
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(2)}B`;
+  if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (abs >= 1_000) return `${(value / 1_000).toFixed(2)}K`;
+  return value.toFixed(0);
+}
+
+export default function PerformancePanel({ backtest, risk, institutional, institutionalLoading = false }: PerformancePanelProps) {
   if (!backtest) return null;
 
   const curveData = (backtest.equityCurve ?? []).map((point) => ({
@@ -124,6 +173,97 @@ export default function PerformancePanel({ backtest, risk }: PerformancePanelPro
           <div className="w-full h-full flex items-center justify-center text-zinc-500 text-sm">
             Not enough backtest points for equity curve.
           </div>
+        )}
+      </div>
+
+      <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-3 space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="text-xs uppercase tracking-wider text-zinc-400">Institutional Order Flow</div>
+          <div className="text-[11px] text-zinc-500">
+            {institutional?.updatedAt ? `Updated ${new Date(institutional.updatedAt).toLocaleTimeString()}` : 'Live sync'}
+          </div>
+        </div>
+
+        {institutionalLoading && !institutional ? (
+          <div className="text-xs text-zinc-500">Loading institutional ownership activity...</div>
+        ) : !institutional?.supported ? (
+          <div className="text-xs text-zinc-500">
+            {institutional?.note ?? 'Institutional feed available only for stock symbols.'}
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+              <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-2">
+                <div className="text-emerald-300 uppercase text-[10px]">Buy Actors</div>
+                <div className="text-white font-mono">{institutional?.summary.buyActors ?? 0}</div>
+              </div>
+              <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-2">
+                <div className="text-rose-300 uppercase text-[10px]">Sell Actors</div>
+                <div className="text-white font-mono">{institutional?.summary.sellActors ?? 0}</div>
+              </div>
+              <div className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 p-2">
+                <div className="text-cyan-300 uppercase text-[10px]">Buy Flow</div>
+                <div className="text-white font-mono">{compact(institutional?.summary.buyFlowShares)}</div>
+              </div>
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2">
+                <div className="text-amber-300 uppercase text-[10px]">Sell Flow</div>
+                <div className="text-white font-mono">{compact(institutional?.summary.sellFlowShares)}</div>
+              </div>
+              <div className="rounded-lg border border-zinc-700 bg-zinc-950 p-2">
+                <div className="text-zinc-400 uppercase text-[10px]">Dominant</div>
+                <div className={`font-mono ${
+                  institutional?.summary.dominantSide === 'BUY'
+                    ? 'text-emerald-300'
+                    : institutional?.summary.dominantSide === 'SELL'
+                      ? 'text-rose-300'
+                      : 'text-zinc-300'
+                }`}>
+                  {institutional?.summary.dominantSide ?? 'NEUTRAL'} ({fmt(institutional?.summary.dominanceScore, 1)}%)
+                </div>
+              </div>
+            </div>
+
+            <div className="text-[11px] text-zinc-500">
+              Insider net flow: {compact(institutional?.insiderNetShares)} shares | Buy {compact(institutional?.insiderBuyShares)} | Sell {compact(institutional?.insiderSellShares)}
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-[11px]">
+                <thead>
+                  <tr className="text-zinc-500 border-b border-zinc-800">
+                    <th className="text-left py-2 pr-2">Institution</th>
+                    <th className="text-left py-2 pr-2">Side</th>
+                    <th className="text-right py-2 pr-2">Flow</th>
+                    <th className="text-right py-2 pr-2">%Held</th>
+                    <th className="text-right py-2 pr-2">%Change</th>
+                    <th className="text-right py-2">Report</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(institutional?.rows ?? []).slice(0, 12).map((row, index) => (
+                    <tr key={`${row.organization}-${index}`} className="border-b border-zinc-900">
+                      <td className="py-2 pr-2 text-zinc-200">{row.organization}</td>
+                      <td className="py-2 pr-2">
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                          row.side === 'BUY'
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : row.side === 'SELL'
+                              ? 'bg-rose-500/20 text-rose-300'
+                              : 'bg-zinc-700 text-zinc-300'
+                        }`}>
+                          {row.side}
+                        </span>
+                      </td>
+                      <td className="py-2 pr-2 text-right text-zinc-100 font-mono">{compact(row.estimatedFlowShares)}</td>
+                      <td className="py-2 pr-2 text-right text-zinc-300 font-mono">{fmt(row.pctHeld, 3)}%</td>
+                      <td className="py-2 pr-2 text-right text-zinc-300 font-mono">{fmt(row.pctChange, 3)}%</td>
+                      <td className="py-2 text-right text-zinc-500">{new Date(row.reportDate).toLocaleDateString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </div>
 
