@@ -108,9 +108,9 @@ function compact(value: number | null | undefined): string {
 }
 
 export default function PerformancePanel({ backtest, risk, institutional, institutionalLoading = false }: PerformancePanelProps) {
-  if (!backtest) return null;
+  if (!backtest && !institutional) return null;
 
-  const curveData = (backtest.equityCurve ?? []).map((point) => ({
+  const curveData = (backtest?.equityCurve ?? []).map((point) => ({
     ...point,
     label: format(new Date(point.date), 'MMM dd'),
   }));
@@ -127,30 +127,30 @@ export default function PerformancePanel({ backtest, risk, institutional, instit
           Institutional Evaluation
         </h3>
         <span className="text-xs px-2 py-1 rounded-md bg-zinc-800 text-zinc-300">
-          Folds {backtest.walkForwardFolds || 0}
+          Folds {backtest?.walkForwardFolds || 0}
         </span>
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
         <div className="bg-zinc-900 rounded-lg border border-zinc-800 p-3">
           <div className="text-zinc-500">Net PnL</div>
-          <div className="text-white font-mono">{fmt(backtest.netProfitPct)}%</div>
+          <div className="text-white font-mono">{fmt(backtest?.netProfitPct)}%</div>
         </div>
         <div className="bg-zinc-900 rounded-lg border border-zinc-800 p-3">
           <div className="text-zinc-500">Sharpe</div>
-          <div className="text-white font-mono">{fmt(backtest.sharpe, 3)}</div>
+          <div className="text-white font-mono">{fmt(backtest?.sharpe, 3)}</div>
         </div>
         <div className="bg-zinc-900 rounded-lg border border-zinc-800 p-3">
           <div className="text-zinc-500">Sortino</div>
-          <div className="text-white font-mono">{fmt(backtest.sortino, 3)}</div>
+          <div className="text-white font-mono">{fmt(backtest?.sortino, 3)}</div>
         </div>
         <div className="bg-zinc-900 rounded-lg border border-zinc-800 p-3">
           <div className="text-zinc-500">Profit Factor</div>
-          <div className="text-white font-mono">{fmt(backtest.profitFactor, 3)}</div>
+          <div className="text-white font-mono">{fmt(backtest?.profitFactor, 3)}</div>
         </div>
         <div className="bg-zinc-900 rounded-lg border border-zinc-800 p-3">
           <div className="text-zinc-500">WF Pass</div>
-          <div className="text-white font-mono">{fmt(backtest.walkForwardPassRate)}%</div>
+          <div className="text-white font-mono">{fmt(backtest?.walkForwardPassRate)}%</div>
         </div>
       </div>
 
@@ -299,11 +299,11 @@ export default function PerformancePanel({ backtest, risk, institutional, instit
         </div>
       )}
 
-      {(backtest.folds?.length ?? 0) > 0 && (
+      {(backtest?.folds?.length ?? 0) > 0 && (
         <div className="space-y-2">
           <div className="text-xs uppercase tracking-wider text-zinc-500">Walk-Forward Folds</div>
           <div className="grid gap-2">
-            {(backtest.folds ?? []).slice(-5).map((fold) => (
+            {(backtest?.folds ?? []).slice(-5).map((fold) => (
               <div key={fold.fold} className="grid grid-cols-5 gap-2 text-xs bg-zinc-900 border border-zinc-800 rounded-lg p-2">
                 <span className="text-zinc-400">Fold {fold.fold}</span>
                 <span className="text-zinc-200">Trades {fold.trades}</span>

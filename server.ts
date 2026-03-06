@@ -3,7 +3,7 @@ import { GoogleGenAI } from "@google/genai";
 
 type MarketType = "stock" | "forex" | "crypto" | "unknown";
 type Signal = "BUY" | "SELL" | "HOLD";
-type StrategyName = "trend" | "mean_reversion" | "breakout" | "momentum";
+type StrategyName = "trend" | "mean_reversion" | "breakout" | "momentum" | "structure";
 type RegimeState = "trending" | "range" | "high_volatility";
 
 interface Candle {
@@ -235,6 +235,13 @@ interface IndicatorSnapshot {
   ema50: number;
   sma20: number;
   std20: number;
+  envelopeUpper: number;
+  envelopeLower: number;
+  support: number;
+  resistance: number;
+  pivotHigh: number;
+  pivotLow: number;
+  pivotStrength: number;
   rsi14: number;
   atr14: number;
   roc5: number;
@@ -1508,6 +1515,18 @@ async function fetchInstitutionalFlow(symbol: SymbolInfo): Promise<Institutional
   }
 }
 
+function buildYahooSymbolCandidates(symbol: SymbolInfo): string[] {
+  const primary = symbol.querySymbol.toUpperCase();
+  const candidates = [primary];
+
+  // Auto-fallback for Indonesian stocks when user inputs ticker without ".JK".
+  if (symbol.marketType === "stock" && !primary.includes(".") && /^[A-Z]{3,5}$/.test(primary)) {
+    candidates.push(`${primary}.JK`);
+  }
+
+  return Array.from(new Set(candidates));
+}
+
 function getPeriod1(range: string): string {
   const date = new Date();
   switch (range) {
@@ -1546,59 +1565,181 @@ function getPeriod1(range: string): string {
 
 async function fetchHistory(symbol: SymbolInfo, interval: string, range: string): Promise<Candle[]> {
   const yahooFinance = await getYahooFinanceClient();
-  const queryOptions: any = {
-    period1: getPeriod1(range),
-    interval,
-  };
+  const queryOptions: any = { period1: getPeriod1(range), interval };
+  const candidates = buildYahooSymbolCandidates(symbol);
+  let lastError: Error | null = null;
 
-  const result: any = await withTimeout(
-    yahooFinance.chart(symbol.querySymbol, queryOptions),
-    REQUEST_TIMEOUT_MS,
-    "Yahoo Finance chart timeout",
-  );
-
-  const quotes = Array.isArray(result?.quotes) ? result.quotes : [];
-  const candles: Candle[] = quotes
-    .map((q: any) => {
-      const date = new Date(q.date);
-      return {
-        date: Number.isFinite(date.getTime()) ? date.toISOString() : "",
-        open: Number(q.open),
-        high: Number(q.high),
-        low: Number(q.low),
-        close: Number(q.close),
-        volume: Number(q.volume ?? 0),
-      };
-    })
-    .filter((q: Candle) => {
-      return (
-        Number.isFinite(new Date(q.date).getTime()) &&
-        Number.isFinite(q.open) &&
-        Number.isFinite(q.high) &&
-        Number.isFinite(q.low) &&
-        Number.isFinite(q.close) &&
-        q.close > 0 &&
-        q.high >= q.low
+  for (const querySymbol of candidates) {
+    try {
+      const result: any = await withTimeout(
+        yahooFinance.chart(querySymbol, queryOptions),
+        REQUEST_TIMEOUT_MS,
+        "Yahoo Finance chart timeout",
       );
-    })
-    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
-  if (!candles.length) {
-    throw new Error(`No valid historical data found for ${symbol.querySymbol}`);
+      const quotes = Array.isArray(result?.quotes) ? result.quotes : [];
+      const candles: Candle[] = quotes
+        .map((q: any) => {
+          const date = new Date(q.date);
+          return {
+            date: Number.isFinite(date.getTime()) ? date.toISOString() : "",
+            open: Number(q.open),
+            high: Number(q.high),
+            low: Number(q.low),
+            close: Number(q.close),
+            volume: Number(q.volume ?? 0),
+          };
+        })
+        .filter((q: Candle) => {
+          return (
+            Number.isFinite(new Date(q.date).getTime()) &&
+            Number.isFinite(q.open) &&
+            Number.isFinite(q.high) &&
+            Number.isFinite(q.low) &&
+            Number.isFinite(q.close) &&
+            q.close > 0 &&
+            q.high >= q.low
+          );
+        })
+        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+      if (candles.length) return candles;
+    } catch (error: any) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
   }
 
-  return candles;
+  if (lastError) throw lastError;
+  throw new Error(`No valid historical data found for ${symbol.querySymbol}`);
 }
 
 async function fetchQuote(symbol: SymbolInfo): Promise<any> {
   const yahooFinance = await getYahooFinanceClient();
-  const quote = await withTimeout(
-    yahooFinance.quote(symbol.querySymbol),
-    REQUEST_TIMEOUT_MS,
-    "Yahoo Finance quote timeout",
-  );
-  if (!quote) throw new Error(`Quote unavailable for ${symbol.querySymbol}`);
-  return quote;
+  const candidates = buildYahooSymbolCandidates(symbol);
+  let lastError: Error | null = null;
+
+  for (const querySymbol of candidates) {
+    try {
+      const quote = await withTimeout(
+        yahooFinance.quote(querySymbol),
+        REQUEST_TIMEOUT_MS,
+        "Yahoo Finance quote timeout",
+      );
+      if (quote) return quote;
+    } catch (error: any) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+
+  if (lastError) throw lastError;
+  throw new Error(`Quote unavailable for ${symbol.querySymbol}`);
+}
+
+interface SignalBuildOptions {
+  fastMode?: boolean;
+  quantumPasses?: number;
+}
+
+function calculatePivotLevels(candles: Candle[], lookback = 48, swing = 2): {
+  pivotHigh: number;
+  pivotLow: number;
+  support: number;
+  resistance: number;
+  strength: number;
+} {
+  const start = Math.max(2, candles.length - lookback);
+  let pivotHigh = -Infinity;
+  let pivotLow = Infinity;
+  let hits = 0;
+
+  for (let i = start; i < candles.length - swing; i++) {
+    const current = candles[i];
+    let isPivotHigh = true;
+    let isPivotLow = true;
+    for (let j = 1; j <= swing; j++) {
+      const prev = candles[i - j];
+      const next = candles[i + j];
+      if (!prev || !next) continue;
+      if (current.high <= prev.high || current.high <= next.high) isPivotHigh = false;
+      if (current.low >= prev.low || current.low >= next.low) isPivotLow = false;
+    }
+    if (isPivotHigh) {
+      pivotHigh = Math.max(pivotHigh, current.high);
+      hits += 1;
+    }
+    if (isPivotLow) {
+      pivotLow = Math.min(pivotLow, current.low);
+      hits += 1;
+    }
+  }
+
+  const window = candles.slice(-Math.max(24, lookback / 2));
+  const rollingHigh = Math.max(...window.map((bar) => bar.high));
+  const rollingLow = Math.min(...window.map((bar) => bar.low));
+  if (!Number.isFinite(pivotHigh)) pivotHigh = rollingHigh;
+  if (!Number.isFinite(pivotLow)) pivotLow = rollingLow;
+
+  const support = Math.min(pivotLow, rollingLow);
+  const resistance = Math.max(pivotHigh, rollingHigh);
+  const strength = clamp(hits / Math.max(lookback / 3, 1), 0.15, 1);
+
+  return {
+    pivotHigh,
+    pivotLow,
+    support,
+    resistance,
+    strength,
+  };
+}
+
+function detectLiquiditySweep(candles: Candle[]): {
+  detected: boolean;
+  bias: "bullish" | "bearish" | "neutral";
+  note: string;
+} {
+  if (candles.length < 10) {
+    return { detected: false, bias: "neutral", note: "Liquidity sweep detection requires at least 10 bars." };
+  }
+
+  const recent = candles[candles.length - 1];
+  const previous = candles.slice(-10, -1);
+  const prevHigh = Math.max(...previous.map((bar) => bar.high));
+  const prevLow = Math.min(...previous.map((bar) => bar.low));
+  const body = Math.abs(recent.close - recent.open);
+  const range = Math.max(recent.high - recent.low, 1e-8);
+  const wickRatio = (range - body) / range;
+
+  const bearishSweep = recent.high > prevHigh && recent.close < prevHigh && wickRatio > 0.55;
+  const bullishSweep = recent.low < prevLow && recent.close > prevLow && wickRatio > 0.55;
+
+  if (bullishSweep) {
+    return { detected: true, bias: "bullish", note: "Liquidity sweep below support suggests possible bullish reversal." };
+  }
+  if (bearishSweep) {
+    return { detected: true, bias: "bearish", note: "Liquidity sweep above resistance suggests possible bearish reversal." };
+  }
+  return { detected: false, bias: "neutral", note: "No high-quality liquidity sweep pattern detected." };
+}
+
+function runQuantumRefinement(baseScore: number, consensus: number, volatilityPct: number, passes: number): {
+  refinedScore: number;
+  stability: number;
+} {
+  const loops = clamp(Math.floor(passes), 256, 10_000);
+  let accum = 0;
+  let positive = 0;
+
+  for (let i = 0; i < loops; i++) {
+    const deterministicNoise = Math.sin((i + 1) * 12.9898 + baseScore * 78.233) * 0.5;
+    const perturbation = deterministicNoise * clamp(volatilityPct / 100, 0.002, 0.08);
+    const sample = baseScore + perturbation + (consensus - 0.5) * 0.14;
+    accum += sample;
+    if (sample >= 0) positive += 1;
+  }
+
+  const refinedScore = accum / loops;
+  const stability = Math.max(positive / loops, 1 - positive / loops);
+  return { refinedScore, stability };
 }
 
 function buildAnalysis(
@@ -1610,7 +1751,7 @@ function buildAnalysis(
 ): AnalysisPayload {
   const signalCandles = getClosedSignalCandles(candles, interval);
   const signalLocked = signalCandles.length < candles.length;
-  const core = generateCoreSignal(signalCandles);
+  const core = generateCoreSignal(signalCandles, { quantumPasses: 10_000, fastMode: false });
   const backtest = runInstitutionalBacktest(candles, interval, symbol.marketType);
   const risk = buildRiskPlan(core, backtest, accountSize);
 
@@ -1660,7 +1801,9 @@ function buildAnalysis(
   };
 }
 
-function generateCoreSignal(candles: Candle[]): CoreSignalResult {
+function generateCoreSignal(candles: Candle[], options: SignalBuildOptions = {}): CoreSignalResult {
+  const fastMode = options.fastMode ?? false;
+  const quantumPasses = options.quantumPasses ?? (fastMode ? 512 : 10_000);
   const fallbackEnsemble: EnsembleResult = {
     score: 0,
     bullishScore: 0,
@@ -1696,10 +1839,17 @@ function generateCoreSignal(candles: Candle[]): CoreSignalResult {
 
   const ind = computeIndicatorSnapshot(candles);
   const ensemble = buildEnsembleSignal(ind);
+  const quantum = runQuantumRefinement(ensemble.score, ensemble.consensus, ind.volatilityPct, quantumPasses);
+  const sweep = detectLiquiditySweep(candles);
+  const combinedScore = clamp(ensemble.score * 0.82 + quantum.refinedScore * 0.18, -1.2, 1.2);
   const entry = ind.lastClose;
 
-  let signal = ensemble.signal;
-  let confidence = clamp(Math.round(ensemble.confidence), 45, 92);
+  let signal: Signal = combinedScore >= 0.2 ? "BUY" : combinedScore <= -0.2 ? "SELL" : "HOLD";
+  let confidence = clamp(
+    Math.round(50 + Math.abs(combinedScore) * 36 + ensemble.consensus * 12 + quantum.stability * 9),
+    45,
+    94,
+  );
 
   const volatilityMult =
     ensemble.regime.state === "high_volatility" ? 1.35 : ensemble.regime.state === "trending" ? 1.05 : 0.95;
@@ -1730,6 +1880,10 @@ function generateCoreSignal(candles: Candle[]): CoreSignalResult {
     ? topVotes.map((vote) => `${vote.name.replace("_", " ")}: ${vote.reason}`)
     : ["Strategy consensus is mixed; no directional edge."];
   reason.push(`legacy sma: ${legacy.reason}`);
+  reason.push(
+    `pivot range: S ${round(ind.support, 6)} | R ${round(ind.resistance, 6)} | strength ${round(ind.pivotStrength * 100, 1)}%`,
+  );
+  reason.push(`envelope: L ${round(ind.envelopeLower, 6)} | U ${round(ind.envelopeUpper, 6)}`);
 
   const warnings: string[] = [];
   if (ensemble.regime.state === "high_volatility") {
@@ -1744,6 +1898,26 @@ function generateCoreSignal(candles: Candle[]): CoreSignalResult {
     warnings.push("Ensemble edge is too small for a directional trade.");
   }
 
+  if (sweep.detected) {
+    reason.push(`liquidity sweep: ${sweep.note}`);
+    if (signal === "BUY" && sweep.bias === "bearish") {
+      confidence = clamp(confidence - 10, 45, 94);
+      warnings.push("Bearish liquidity sweep conflicts with long setup.");
+    }
+    if (signal === "SELL" && sweep.bias === "bullish") {
+      confidence = clamp(confidence - 10, 45, 94);
+      warnings.push("Bullish liquidity sweep conflicts with short setup.");
+    }
+    if (signal === "HOLD" && sweep.bias === "bullish" && ind.rsi14 < 50) {
+      signal = "BUY";
+      confidence = clamp(confidence + 5, 45, 94);
+    }
+    if (signal === "HOLD" && sweep.bias === "bearish" && ind.rsi14 > 50) {
+      signal = "SELL";
+      confidence = clamp(confidence + 5, 45, 94);
+    }
+  }
+
   if (legacy.signal !== "HOLD" && signal !== "HOLD") {
     if (legacy.signal === signal) {
       confidence = clamp(confidence + 3, 45, 92);
@@ -1755,6 +1929,14 @@ function generateCoreSignal(candles: Candle[]): CoreSignalResult {
         warnings.push("Conflict filter set signal to HOLD to avoid floating direction changes.");
       }
     }
+  }
+
+  // Hard gate: only issue directional signals when probability is high enough.
+  if (confidence < 70) {
+    signal = "HOLD";
+    warnings.push(
+      `Signal processing continued: probability ${confidence}% below 70% threshold. No trade output.`,
+    );
   }
 
   const denominator = Math.abs(entry - stopLoss) || 1;
@@ -1784,12 +1966,17 @@ function computeIndicatorSnapshot(candles: Candle[]): IndicatorSnapshot {
   const volumes = candles.map((x) => x.volume || 0);
   const highs = candles.map((x) => x.high);
   const lows = candles.map((x) => x.low);
+  const lastClose = closes[closes.length - 1];
 
   const ema9 = ema(closes, 9);
   const ema21 = ema(closes, 21);
   const ema50 = ema(closes, 50);
   const sma20 = average(closes.slice(-20));
   const std20 = stdDev(closes.slice(-20));
+  const envelopePct = clamp((std20 / Math.max(lastClose, 1e-8)) * 1.2, 0.004, 0.035);
+  const envelopeUpper = ema21 * (1 + envelopePct);
+  const envelopeLower = ema21 * (1 - envelopePct);
+  const pivots = calculatePivotLevels(candles, 48, 2);
   const rsi14 = rsi(closes, 14);
   const atr14 = atr(candles, 14);
   const roc5 = pctChange(closes[closes.length - 1], closes[Math.max(0, closes.length - 6)]);
@@ -1810,7 +1997,6 @@ function computeIndicatorSnapshot(candles: Candle[]): IndicatorSnapshot {
 
   const avgVolume20 = average(volumes.slice(-20));
   const volumeRatio = avgVolume20 > 0 ? volumes[volumes.length - 1] / avgVolume20 : 1;
-  const lastClose = closes[closes.length - 1];
   const trendStrength = Math.abs(ema21 - ema50) / Math.max(lastClose, 1e-8) * 100;
   const volatilityPct = atr14 / Math.max(lastClose, 1e-8) * 100;
 
@@ -1821,6 +2007,13 @@ function computeIndicatorSnapshot(candles: Candle[]): IndicatorSnapshot {
     ema50,
     sma20,
     std20,
+    envelopeUpper,
+    envelopeLower,
+    support: pivots.support,
+    resistance: pivots.resistance,
+    pivotHigh: pivots.pivotHigh,
+    pivotLow: pivots.pivotLow,
+    pivotStrength: pivots.strength,
     rsi14,
     atr14,
     roc5,
@@ -1845,6 +2038,7 @@ function buildEnsembleSignal(ind: IndicatorSnapshot): EnsembleResult {
     buildMeanReversionVote(ind, regimeState),
     buildBreakoutVote(ind),
     buildMomentumVote(ind),
+    buildStructureVote(ind),
   ];
 
   const weights = getRegimeWeights(regimeState);
@@ -1968,14 +2162,50 @@ function buildMomentumVote(ind: IndicatorSnapshot): StrategyVote {
   };
 }
 
+function buildStructureVote(ind: IndicatorSnapshot): StrategyVote {
+  const span = Math.max(ind.resistance - ind.support, ind.lastClose * 0.008);
+  const supportDistance = (ind.lastClose - ind.support) / span;
+  const resistanceDistance = (ind.resistance - ind.lastClose) / span;
+
+  let score = 0;
+  if (supportDistance <= 0.24 && ind.rsi14 <= 47) score += 0.36;
+  if (resistanceDistance <= 0.24 && ind.rsi14 >= 53) score -= 0.36;
+  if (ind.lastClose > ind.pivotHigh) score += 0.24;
+  if (ind.lastClose < ind.pivotLow) score -= 0.24;
+  if (ind.lastClose < ind.envelopeLower) score += 0.18;
+  if (ind.lastClose > ind.envelopeUpper) score -= 0.18;
+
+  score *= clamp(ind.pivotStrength, 0.45, 1);
+  score = clamp(score, -1, 1);
+
+  const signal = score >= 0.2 ? "BUY" : score <= -0.2 ? "SELL" : "HOLD";
+  const confidence = clamp(Math.round(50 + Math.abs(score) * 34 + ind.pivotStrength * 10), 44, 90);
+
+  const reason =
+    signal === "BUY"
+      ? "Price reacted near support/pivot structure with envelope compression."
+      : signal === "SELL"
+        ? "Price reacted near resistance/pivot structure with envelope extension."
+        : "Support-resistance structure has no decisive edge.";
+
+  return {
+    name: "structure",
+    score,
+    signal,
+    confidence,
+    weight: 0,
+    reason,
+  };
+}
+
 function getRegimeWeights(regime: RegimeState): Record<StrategyName, number> {
   if (regime === "trending") {
-    return { trend: 0.38, breakout: 0.3, momentum: 0.22, mean_reversion: 0.1 };
+    return { trend: 0.3, breakout: 0.24, momentum: 0.18, structure: 0.2, mean_reversion: 0.08 };
   }
   if (regime === "high_volatility") {
-    return { trend: 0.25, breakout: 0.34, momentum: 0.26, mean_reversion: 0.15 };
+    return { trend: 0.21, breakout: 0.29, momentum: 0.2, structure: 0.18, mean_reversion: 0.12 };
   }
-  return { trend: 0.2, breakout: 0.17, momentum: 0.27, mean_reversion: 0.36 };
+  return { trend: 0.18, breakout: 0.15, momentum: 0.2, structure: 0.24, mean_reversion: 0.23 };
 }
 
 function legacySmaSignal(candles: Candle[]): { signal: Signal; reason: string } {
@@ -2146,7 +2376,7 @@ function simulateBacktestSegment(
         shouldExit = true;
         exitReason = "time_exit";
       } else if (position.barsHeld >= 3) {
-        const flipSignal = generateCoreSignal(history).signal;
+        const flipSignal = generateCoreSignal(history, { fastMode: true, quantumPasses: 512 }).signal;
         if ((position.direction === 1 && flipSignal === "SELL") || (position.direction === -1 && flipSignal === "BUY")) {
           shouldExit = true;
           exitReason = "signal_flip";
@@ -2197,9 +2427,9 @@ function simulateBacktestSegment(
 
     if (cooldownBars > 0) continue;
 
-    const signalData = generateCoreSignal(history);
-    if (signalData.signal === "HOLD" || signalData.confidence < 58) continue;
-    if (Math.abs(signalData.ensemble.score) < 0.3 || signalData.ensemble.consensus < 0.5) continue;
+    const signalData = generateCoreSignal(history, { fastMode: true, quantumPasses: 512 });
+    if (signalData.signal === "HOLD" || signalData.confidence < 70) continue;
+    if (Math.abs(signalData.ensemble.score) < 0.34 || signalData.ensemble.consensus < 0.6) continue;
     if (signalData.signal === "BUY" && signalData.trend === "Bearish") continue;
     if (signalData.signal === "SELL" && signalData.trend === "Bullish") continue;
 
@@ -2416,7 +2646,7 @@ function buildRiskPlan(core: CoreSignalResult, backtest: BacktestMetrics, accoun
   const allowedTrade =
     !killSwitch &&
     core.signal !== "HOLD" &&
-    core.confidence >= 54 &&
+    core.confidence >= 70 &&
     (backtest.trades >= 12 ? (backtest.profitFactor ?? 0) >= 0.98 : true);
 
   const notes: string[] = [];

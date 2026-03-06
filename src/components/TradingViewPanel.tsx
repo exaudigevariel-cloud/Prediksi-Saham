@@ -13,6 +13,7 @@ interface TradingViewPanelProps {
   interval: string;
   studiesCsv: string;
   theme?: 'dark' | 'light';
+  instanceId?: string;
 }
 
 const SCRIPT_SRC = 'https://s3.tradingview.com/tv.js';
@@ -63,7 +64,7 @@ function toTradingViewInterval(interval: string): string {
   return map[normalized] ?? '60';
 }
 
-export default function TradingViewPanel({ symbol, interval, studiesCsv, theme = 'dark' }: TradingViewPanelProps) {
+export default function TradingViewPanel({ symbol, interval, studiesCsv, theme = 'dark', instanceId = 'default' }: TradingViewPanelProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const studies = useMemo(
@@ -76,8 +77,8 @@ export default function TradingViewPanel({ symbol, interval, studiesCsv, theme =
   );
 
   const containerId = useMemo(
-    () => `tv-widget-${symbol.replace(/[^A-Z0-9:_-]/gi, '').toLowerCase()}-${interval}`,
-    [symbol, interval],
+    () => `tv-widget-${symbol.replace(/[^A-Z0-9:_-]/gi, '').toLowerCase()}-${interval}-${instanceId.replace(/[^a-z0-9_-]/gi, '').toLowerCase()}`,
+    [symbol, interval, instanceId],
   );
 
   useEffect(() => {

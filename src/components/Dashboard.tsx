@@ -872,6 +872,10 @@ export default function Dashboard() {
               <div className="absolute inset-0 flex items-center justify-center">
                 <div className="w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
               </div>
+            ) : tvExpanded && chartMode === 'tradingview' ? (
+              <div className="h-full w-full rounded-xl border border-zinc-800 bg-zinc-900/70 flex items-center justify-center text-sm text-zinc-400">
+                Chart dipindah ke mode expanded. Tekan Close untuk kembali ke ukuran normal.
+              </div>
             ) : (
               chartMode === 'tradingview' ? (
                 <TradingViewPanel
@@ -879,6 +883,7 @@ export default function Dashboard() {
                   interval={timeframe.interval}
                   studiesCsv={tradingViewStudiesCsv}
                   theme={tvTheme}
+                  instanceId="inline"
                 />
               ) : (
                 <Chart data={data} />
@@ -993,6 +998,7 @@ export default function Dashboard() {
                     interval={timeframe.interval}
                     studiesCsv={tradingViewStudiesCsv}
                     theme={tvTheme}
+                    instanceId="expanded"
                   />
                 ) : (
                   <Chart data={data} />
