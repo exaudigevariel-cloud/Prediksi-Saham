@@ -240,6 +240,7 @@ const VALID_INTERVALS = new Set([
 
 const VALID_RANGES = new Set(["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "max"]);
 const FX_CODES = new Set(["USD", "EUR", "JPY", "GBP", "AUD", "NZD", "CAD", "CHF"]);
+const METAL_CODES = new Set(["XAU", "XAG", "XPT", "XPD"]);
 
 type YahooFinanceClient = {
   chart: (symbol: string, options: any) => Promise<any>;
@@ -552,6 +553,14 @@ function normalizeSymbol(input: string): SymbolInfo {
 
   if (raw.includes("/")) {
     const [base, quote] = raw.split("/");
+    if (base && quote && METAL_CODES.has(base) && quote === "USD") {
+      return {
+        input,
+        displaySymbol: `${base}/${quote}`,
+        querySymbol: `${base}${quote}=X`,
+        marketType: "forex",
+      };
+    }
     if (base && quote && base.length === 3 && quote.length === 3 && FX_CODES.has(base) && FX_CODES.has(quote)) {
       return {
         input,
@@ -583,6 +592,14 @@ function normalizeSymbol(input: string): SymbolInfo {
   if (/^[A-Z]{6}$/.test(raw)) {
     const base = raw.slice(0, 3);
     const quote = raw.slice(3, 6);
+    if (METAL_CODES.has(base) && quote === "USD") {
+      return {
+        input,
+        displaySymbol: `${base}/${quote}`,
+        querySymbol: `${base}${quote}=X`,
+        marketType: "forex",
+      };
+    }
     if (FX_CODES.has(base) && FX_CODES.has(quote)) {
       return {
         input,
@@ -591,7 +608,7 @@ function normalizeSymbol(input: string): SymbolInfo {
         marketType: "forex",
       };
     }
-    if (quote === "USD") {
+    if (quote === "USD" && !METAL_CODES.has(base)) {
       return {
         input,
         displaySymbol: `${base}/USD`,
