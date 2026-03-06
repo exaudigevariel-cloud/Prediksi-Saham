@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { motion } from 'motion/react';
 import {
   Activity,
@@ -392,14 +392,30 @@ export default function Dashboard() {
   const [headlineCursor, setHeadlineCursor] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const snapshotReqSeq = useRef(0);
+  const intelReqSeq = useRef(0);
+  const institutionalReqSeq = useRef(0);
 
-  const fetchData = async (showLoading = true) => {
+  const fetchData = async (
+    showLoading = true,
+    targetSymbol = symbol,
+    targetTimeframe: TimeframeConfig = timeframe,
+  ) => {
+    const reqId = ++snapshotReqSeq.current;
     if (showLoading) setLoading(true);
+    if (showLoading) {
+      // Avoid showing stale symbol/price while user has switched pair.
+      setResolvedSymbol(targetSymbol.toUpperCase());
+      setQuote(null);
+      setAnalysis(null);
+      setData([]);
+    }
     setError(null);
     try {
       const response = await fetch(
-        `/api/stock/${encodeURIComponent(symbol)}/snapshot?interval=${timeframe.interval}&range=${timeframe.range}`
+        `/api/stock/${encodeURIComponent(targetSymbol)}/snapshot?interval=${targetTimeframe.interval}&range=${targetTimeframe.range}`
       );
+      if (reqId !== snapshotReqSeq.current) return;
       if (!response.ok) {
         let message = `Failed to fetch market data (${response.status})`;
         try {
@@ -414,44 +430,57 @@ export default function Dashboard() {
       }
 
       const snapshot: SnapshotResponse = await response.json();
-      setResolvedSymbol(snapshot.symbol || symbol.toUpperCase());
+      if (reqId !== snapshotReqSeq.current) return;
+      setResolvedSymbol(snapshot.symbol || targetSymbol.toUpperCase());
       setMarketType(snapshot.marketType || 'stock');
       setData(Array.isArray(snapshot.history) ? snapshot.history : []);
       setQuote(snapshot.quote ?? null);
       setAnalysis(snapshot.analysis ?? null);
     } catch (error) {
+      if (reqId !== snapshotReqSeq.current) return;
       console.error("Error fetching data:", error);
       setError(error instanceof Error ? error.message : 'Unknown error while loading market data');
     } finally {
+      if (reqId !== snapshotReqSeq.current) return;
       if (showLoading) setLoading(false);
     }
   };
 
-  const fetchIntel = async () => {
+  const fetchIntel = async (targetSymbol = symbol) => {
+    const reqId = ++intelReqSeq.current;
     setIntelLoading(true);
     try {
-      const response = await fetch(`/api/intel/${encodeURIComponent(symbol)}`);
+      const response = await fetch(`/api/intel/${encodeURIComponent(targetSymbol)}`);
+      if (reqId !== intelReqSeq.current) return;
       if (!response.ok) throw new Error(`Intel request failed (${response.status})`);
       const payload: MarketIntelResponse = await response.json();
+      if (reqId !== intelReqSeq.current) return;
       setIntel(payload);
       setHeadlineCursor(0);
     } catch (intelError) {
+      if (reqId !== intelReqSeq.current) return;
       console.error('Intel fetch error:', intelError);
     } finally {
+      if (reqId !== intelReqSeq.current) return;
       setIntelLoading(false);
     }
   };
 
-  const fetchInstitutional = async () => {
+  const fetchInstitutional = async (targetSymbol = symbol) => {
+    const reqId = ++institutionalReqSeq.current;
     setInstitutionalLoading(true);
     try {
-      const response = await fetch(`/api/institutional/${encodeURIComponent(symbol)}`);
+      const response = await fetch(`/api/institutional/${encodeURIComponent(targetSymbol)}`);
+      if (reqId !== institutionalReqSeq.current) return;
       if (!response.ok) throw new Error(`Institutional request failed (${response.status})`);
       const payload: InstitutionalResponse = await response.json();
+      if (reqId !== institutionalReqSeq.current) return;
       setInstitutional(payload);
     } catch (institutionalError) {
+      if (reqId !== institutionalReqSeq.current) return;
       console.error('Institutional fetch error:', institutionalError);
     } finally {
+      if (reqId !== institutionalReqSeq.current) return;
       setInstitutionalLoading(false);
     }
   };
@@ -540,9 +569,20 @@ export default function Dashboard() {
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
-    if (searchInput.trim()) {
-      setSymbol(searchInput.toUpperCase());
+    const next = searchInput.trim().toUpperCase();
+    if (!next) return;
+
+    setSearchInput(next);
+    if (next === symbol) {
+      fetchData(true, next, timeframe);
+      fetchIntel(next);
+      fetchInstitutional(next);
+      return;
     }
+
+    setIntel(null);
+    setInstitutional(null);
+    setSymbol(next);
   };
 
   const signal: Signal = analysis?.signal ?? 'HOLD';
@@ -684,9 +724,15 @@ export default function Dashboard() {
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
                 placeholder="AAPL, EURUSD, BTC-USD"
-                className="w-full bg-zinc-900 border border-zinc-800 rounded-xl py-2 pl-10 pr-4 text-sm text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/50 transition-all"
+                className="w-full bg-zinc-900 border border-zinc-800 rounded-xl py-2 pl-10 pr-10 text-sm text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/50 transition-all"
               />
               <Search className="absolute left-3 top-2.5 w-4 h-4 text-zinc-500" />
+              <button
+                type="submit"
+                className="absolute right-2 top-1.5 px-1.5 py-1 rounded-md text-[10px] font-semibold bg-zinc-800 text-zinc-200 hover:bg-zinc-700 transition"
+              >
+                Go
+              </button>
             </form>
           </div>
         </header>
