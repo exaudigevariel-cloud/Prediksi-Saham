@@ -183,6 +183,9 @@ export default function PerformancePanel({ backtest, risk, institutional, instit
             {institutional?.updatedAt ? `Updated ${new Date(institutional.updatedAt).toLocaleTimeString()}` : 'Live sync'}
           </div>
         </div>
+        <div className="text-[11px] text-zinc-500">
+          Source: Yahoo Finance ownership modules (`institutionOwnership`, `fundOwnership`, insider net share activity).
+        </div>
 
         {institutionalLoading && !institutional ? (
           <div className="text-xs text-zinc-500">Loading institutional ownership activity...</div>

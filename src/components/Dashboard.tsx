@@ -132,6 +132,20 @@ interface CalendarEvent {
   impact: 'high' | 'medium' | 'low';
   timestamp: string;
   source: string;
+  currency?: string;
+  link?: string;
+  isUpcoming?: boolean;
+}
+
+interface IntelNarrative {
+  bias: 'bullish' | 'bearish' | 'neutral';
+  warningLevel: 'high' | 'medium' | 'low';
+  strength: number;
+  summary: string;
+  factors: string[];
+  sentimentScore: number;
+  upcomingHighImpact: number;
+  recentHighImpact: number;
 }
 
 interface MarketIntelResponse {
@@ -139,6 +153,9 @@ interface MarketIntelResponse {
   marketType: string;
   headlines: IntelHeadline[];
   calendar: CalendarEvent[];
+  narrative?: IntelNarrative;
+  warnings?: string[];
+  freshnessHours?: number;
   updatedAt: string;
 }
 
@@ -232,6 +249,62 @@ function toTradingViewSymbol(symbol: string, marketType: string): string {
 }
 
 const DEFAULT_STUDIES = 'MACD@tv-basicstudies,RSI@tv-basicstudies,BB@tv-basicstudies,EMA@tv-basicstudies';
+const DEFAULT_PINE_LIKE_SCRIPT = `//@version=5
+indicator("Omni Hybrid", overlay=true)
+fast = ta.ema(close, 21)
+slow = ta.ema(close, 55)
+r = ta.rsi(close, 14)
+plot(fast, color=color.new(color.green, 0))
+plot(slow, color=color.new(color.red, 0))
+plot(r)`;
+
+interface PineConversionResult {
+  studies: string[];
+  supported: string[];
+  unsupported: string[];
+}
+
+function convertPineLikeScript(script: string): PineConversionResult {
+  const content = script.toLowerCase();
+  const mappings: Array<{ token: string; study: string; name: string }> = [
+    { token: 'ta.ema(', study: 'EMA@tv-basicstudies', name: 'EMA' },
+    { token: 'ta.sma(', study: 'MASimple@tv-basicstudies', name: 'SMA' },
+    { token: 'ta.rsi(', study: 'RSI@tv-basicstudies', name: 'RSI' },
+    { token: 'ta.macd(', study: 'MACD@tv-basicstudies', name: 'MACD' },
+    { token: 'ta.bb(', study: 'BB@tv-basicstudies', name: 'Bollinger Bands' },
+    { token: 'ta.stoch(', study: 'Stochastic@tv-basicstudies', name: 'Stochastic' },
+    { token: 'ta.atr(', study: 'ATR@tv-basicstudies', name: 'ATR' },
+    { token: 'ta.vwma(', study: 'VWMA@tv-basicstudies', name: 'VWMA' },
+  ];
+
+  const supported: string[] = [];
+  const studies = new Set<string>();
+  for (const mapping of mappings) {
+    if (content.includes(mapping.token)) {
+      supported.push(mapping.name);
+      studies.add(mapping.study);
+    }
+  }
+
+  const unsupportedTokens = [
+    'strategy.entry(',
+    'strategy.exit(',
+    'strategy.order(',
+    'request.security(',
+    'alertcondition(',
+    'table.',
+    'line.new(',
+    'label.new(',
+    'plotshape(',
+  ];
+  const unsupported = unsupportedTokens.filter((token) => content.includes(token));
+
+  return {
+    studies: Array.from(studies),
+    supported,
+    unsupported,
+  };
+}
 
 export default function Dashboard() {
   const [symbol, setSymbol] = useState('AAPL');
@@ -242,6 +315,10 @@ export default function Dashboard() {
   const [tvTheme, setTvTheme] = useState<'dark' | 'light'>('dark');
   const [tvSymbolOverride, setTvSymbolOverride] = useState('');
   const [tvStudiesInput, setTvStudiesInput] = useState(DEFAULT_STUDIES);
+  const [pineScriptInput, setPineScriptInput] = useState(DEFAULT_PINE_LIKE_SCRIPT);
+  const [pineConversion, setPineConversion] = useState<PineConversionResult>(() =>
+    convertPineLikeScript(DEFAULT_PINE_LIKE_SCRIPT),
+  );
   const [timeframe, setTimeframe] = useState<TimeframeConfig>(TIMEFRAMES[2]);
   const [data, setData] = useState<any[]>([]);
   const [quote, setQuote] = useState<any>(null);
@@ -335,6 +412,21 @@ export default function Dashboard() {
     }
   };
 
+  const applyPineStudies = () => {
+    const parsed = convertPineLikeScript(pineScriptInput);
+    setPineConversion(parsed);
+    if (!parsed.studies.length) return;
+
+    const merged = new Set(
+      tvStudiesInput
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean),
+    );
+    parsed.studies.forEach((study) => merged.add(study));
+    setTvStudiesInput(Array.from(merged).join(','));
+  };
+
   useEffect(() => {
     fetchData(true);
     fetchIntel();
@@ -426,6 +518,36 @@ export default function Dashboard() {
       .slice(0, 4);
     return { count, topRegions };
   }, [geoEvents]);
+
+  const professionalComposite = useMemo(() => {
+    const modelConfidence = analysis?.confidence ?? 50;
+    const institutionalBias =
+      institutional?.supported && institutional.summary
+        ? institutional.summary.dominantSide === 'BUY'
+          ? institutional.summary.dominanceScore
+          : institutional.summary.dominantSide === 'SELL'
+            ? -institutional.summary.dominanceScore
+            : 0
+        : 0;
+    const newsBias = intel?.narrative
+      ? intel.narrative.bias === 'bullish'
+        ? intel.narrative.strength
+        : intel.narrative.bias === 'bearish'
+          ? -intel.narrative.strength
+          : 0
+      : 0;
+    const warningPenalty =
+      intel?.narrative?.warningLevel === 'high'
+        ? 18
+        : intel?.narrative?.warningLevel === 'medium'
+          ? 8
+          : 0;
+
+    const raw = modelConfidence * 0.6 + institutionalBias * 0.2 + newsBias * 0.2 - warningPenalty;
+    const score = Math.max(0, Math.min(100, raw));
+    const direction = score >= 60 ? 'BULLISH' : score <= 40 ? 'BEARISH' : 'NEUTRAL';
+    return { score, direction };
+  }, [analysis?.confidence, institutional, intel?.narrative]);
 
   return (
     <div className="max-w-[1700px] mx-auto p-4 md:p-6 lg:p-8 grid grid-cols-1 lg:grid-cols-4 gap-6">
@@ -558,8 +680,44 @@ export default function Dashboard() {
                   className="mt-1 w-full bg-zinc-900 border border-zinc-800 rounded-lg py-2 px-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-500/40"
                 />
               </label>
-              <div className="md:col-span-2 text-[11px] text-zinc-500">
-                Mode ini pakai chart engine TradingView yang real-time style. Kamu bisa set indikator favorit sendiri via daftar studies.
+              <div className="md:col-span-2 rounded-xl border border-zinc-800 bg-zinc-900 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs text-zinc-400">Pine-Style Script Workspace (subset parser)</div>
+                  <button
+                    onClick={applyPineStudies}
+                    className="px-2 py-1 rounded-md text-[11px] font-semibold bg-cyan-500 text-zinc-950 hover:bg-cyan-400 transition"
+                  >
+                    Parse to Apply Indicators
+                  </button>
+                </div>
+                <textarea
+                  value={pineScriptInput}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setPineScriptInput(value);
+                    setPineConversion(convertPineLikeScript(value));
+                  }}
+                  rows={8}
+                  spellCheck={false}
+                  className="mt-2 w-full resize-y bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-[11px] font-mono text-zinc-200 focus:outline-none focus:ring-2 focus:ring-cyan-500/40"
+                />
+                <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px]">
+                  <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-2">
+                    <div className="text-emerald-300 uppercase mb-1">Supported Parsed</div>
+                    <div className="text-zinc-200">
+                      {pineConversion.supported.length ? pineConversion.supported.join(', ') : 'No supported indicators detected.'}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-2">
+                    <div className="text-amber-300 uppercase mb-1">Not Supported In Widget</div>
+                    <div className="text-zinc-200">
+                      {pineConversion.unsupported.length ? pineConversion.unsupported.join(', ') : 'None'}
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-2 text-[11px] text-zinc-500">
+                  TradingView widget publik tidak bisa compile Pine Script penuh. Workspace ini parse bagian populer lalu otomatis mapping ke studies.
+                </div>
               </div>
             </div>
           )}
@@ -781,9 +939,14 @@ export default function Dashboard() {
         <div className="bg-zinc-900/50 border border-zinc-800/50 rounded-2xl p-4 backdrop-blur-sm">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-sm uppercase tracking-wider text-zinc-400">Fundamental & News</h3>
-            <span className="text-[11px] text-zinc-500">
-              {intel?.updatedAt ? `Updated ${new Date(intel.updatedAt).toLocaleTimeString()}` : 'Loading...'}
-            </span>
+            <div className="text-right">
+              <span className="block text-[11px] text-zinc-500">
+                {intel?.updatedAt ? `Updated ${new Date(intel.updatedAt).toLocaleTimeString()}` : 'Loading...'}
+              </span>
+              <span className="block text-[10px] text-zinc-600">
+                Fresh window: {intel?.freshnessHours ?? 48}h
+              </span>
+            </div>
           </div>
 
           <div className="mb-4 rounded-xl border border-zinc-800 bg-zinc-900 p-3">
@@ -800,6 +963,45 @@ export default function Dashboard() {
             <div className="text-xs text-zinc-400 mt-1">
               Entry {formatMetric(analysis?.entry, 4)} | TP1 {formatMetric(analysis?.takeProfit1, 4)} | SL {formatMetric(analysis?.stopLoss, 4)}
             </div>
+            <div className="mt-2 grid grid-cols-2 gap-2 text-[11px]">
+              <div className="rounded-md border border-cyan-500/20 bg-cyan-500/5 p-2">
+                <div className="text-cyan-300 uppercase">Composite Score</div>
+                <div className="text-zinc-100 font-mono">{formatMetric(professionalComposite.score, 1)} / 100</div>
+              </div>
+              <div className="rounded-md border border-zinc-700 bg-zinc-950 p-2">
+                <div className="text-zinc-400 uppercase">Composite Bias</div>
+                <div className="text-zinc-100 font-mono">{professionalComposite.direction}</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="mb-4 rounded-xl border border-zinc-800 bg-zinc-900 p-3">
+            <div className="flex items-center justify-between">
+              <div className="text-xs text-zinc-500">News Reaction Model</div>
+              <span className={`text-[10px] font-bold uppercase ${
+                intel?.narrative?.warningLevel === 'high'
+                  ? 'text-rose-400'
+                  : intel?.narrative?.warningLevel === 'medium'
+                    ? 'text-amber-400'
+                    : 'text-emerald-400'
+              }`}>
+                {intel?.narrative?.warningLevel ?? 'low'} warning
+              </span>
+            </div>
+            <div className="mt-1 text-sm text-white">
+              Bias <span className="font-semibold uppercase">{intel?.narrative?.bias ?? 'neutral'}</span> | Strength{' '}
+              <span className="font-mono">{formatMetric(intel?.narrative?.strength, 1)}%</span>
+            </div>
+            <div className="text-xs text-zinc-400 mt-1">
+              {intel?.narrative?.summary ?? 'Waiting for fresh fundamental context...'}
+            </div>
+            {(intel?.warnings?.length ?? 0) > 0 && (
+              <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2 text-[11px] text-amber-200 space-y-1">
+                {intel?.warnings?.slice(0, 3).map((warning, index) => (
+                  <p key={`${warning}-${index}`}>- {warning}</p>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="mb-4">
@@ -819,7 +1021,22 @@ export default function Dashboard() {
                       {event.impact}
                     </span>
                   </div>
-                  <div className="text-[11px] text-zinc-500 mt-1">{new Date(event.timestamp).toLocaleString()}</div>
+                  <div className="mt-1 flex items-center justify-between text-[11px] text-zinc-500 gap-2">
+                    <span>{new Date(event.timestamp).toLocaleString()}</span>
+                    <span className="uppercase">
+                      {event.currency ?? 'global'} {event.isUpcoming ? '• upcoming' : '• released'}
+                    </span>
+                  </div>
+                  <div className="mt-1 flex items-center justify-between text-[10px] text-zinc-600">
+                    <span>{event.source}</span>
+                    {event.link ? (
+                      <a href={event.link} target="_blank" rel="noreferrer" className="text-cyan-400 hover:text-cyan-300">
+                        source
+                      </a>
+                    ) : (
+                      <span>feed</span>
+                    )}
+                  </div>
                 </div>
               ))}
               {!intelLoading && (!intel || intel.calendar.length === 0) && (
@@ -874,6 +1091,9 @@ export default function Dashboard() {
                   </div>
                 </a>
               ))}
+              {!intelLoading && (intel?.headlines?.length ?? 0) === 0 && (
+                <div className="text-xs text-zinc-500">No fresh headline in last 48 hours for this pair.</div>
+              )}
               {intelLoading && (
                 <div className="text-xs text-zinc-500">Loading symbol-specific fundamental news...</div>
               )}

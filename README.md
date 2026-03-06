@@ -5,7 +5,17 @@ Institutional-style market analysis and signal dashboard (stocks, forex, crypto)
 - ensemble strategy scoring,
 - walk-forward backtest diagnostics,
 - risk manager with kill-switch,
-- AI assistant chat endpoint.
+- AI assistant chat endpoint,
+- institutional ownership flow table (Yahoo ownership modules),
+- fresh fundamental/news feeds filtered to last 48 hours,
+- geopolitical monitor feed (last 48 hours),
+- TradingView panel with Pine-style script parser (subset -> mapped studies).
+
+## Pine Script Note
+
+- The public TradingView widget cannot execute full custom Pine Script engine.
+- Current implementation provides a Pine-style input parser that maps common indicators (`EMA`, `RSI`, `MACD`, `BB`, etc.) to TradingView studies.
+- Full Pine compatibility requires TradingView Charting Library licensing + custom datafeed/backend integration.
 
 ## Local Run
 

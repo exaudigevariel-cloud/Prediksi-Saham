@@ -36,6 +36,20 @@ interface CalendarItem {
   impact: "high" | "medium" | "low";
   timestamp: string;
   source: string;
+  currency?: string;
+  link?: string;
+  isUpcoming?: boolean;
+}
+
+interface IntelNarrative {
+  bias: "bullish" | "bearish" | "neutral";
+  warningLevel: "high" | "medium" | "low";
+  strength: number;
+  summary: string;
+  factors: string[];
+  sentimentScore: number;
+  upcomingHighImpact: number;
+  recentHighImpact: number;
 }
 
 interface GeopoliticalEvent {
@@ -271,6 +285,8 @@ const REQUEST_TIMEOUT_MS = 8_000;
 const DEFAULT_ACCOUNT_SIZE = 10_000;
 const MIN_CANDLES_FOR_MODEL = 80;
 const NEWS_CACHE_TTL_MS = 180_000;
+const FRESH_NEWS_WINDOW_MS = 48 * 60 * 60 * 1000;
+const UPCOMING_NEWS_WINDOW_MS = 48 * 60 * 60 * 1000;
 
 const VALID_INTERVALS = new Set([
   "1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo",
@@ -414,14 +430,25 @@ export async function createApp(options: AppBuildOptions = {}) {
   app.get("/api/intel/:symbol", async (req, res) => {
     try {
       const symbolInfo = normalizeSymbol(req.params.symbol);
-      const headlines = await fetchMarketHeadlines(symbolInfo);
-      const calendar = buildCalendarFromHeadlines(headlines);
+      const [headlines, economicCalendar] = await Promise.all([
+        fetchMarketHeadlines(symbolInfo),
+        fetchEconomicCalendar(symbolInfo).catch(() => []),
+      ]);
+      const calendar = mergeCalendarItems([
+        ...economicCalendar,
+        ...buildCalendarFromHeadlines(headlines),
+      ]);
+      const narrative = buildIntelNarrative(symbolInfo, headlines, calendar);
+      const warnings = buildIntelWarnings(narrative, headlines, calendar);
       res.json({
         symbol: symbolInfo.displaySymbol,
         marketType: symbolInfo.marketType,
         headlines,
         calendar,
-        updatedAt: new Date().toISOString(),
+        narrative,
+        warnings,
+        freshnessHours: 48,
+        updatedAt: resolveFeedUpdatedAt(headlines, calendar),
       });
     } catch (error: any) {
       console.error("Error fetching market intel:", error);
@@ -434,7 +461,8 @@ export async function createApp(options: AppBuildOptions = {}) {
       const events = await fetchGeopoliticalEvents();
       res.json({
         events,
-        updatedAt: new Date().toISOString(),
+        freshnessHours: 48,
+        updatedAt: resolveGeoUpdatedAt(events),
       });
     } catch (error: any) {
       console.error("Error fetching geopolitical monitor:", error);
@@ -728,13 +756,39 @@ function setCached<T>(key: string, value: T, ttlMs = NEWS_CACHE_TTL_MS): void {
   runtimeCache.set(key, { value, expiresAt: Date.now() + ttlMs });
 }
 
+function toTimestamp(value: string | undefined | null): number | null {
+  if (!value) return null;
+  const ts = new Date(value).getTime();
+  return Number.isFinite(ts) ? ts : null;
+}
+
+function isWithinFreshWindow(timestamp: number, freshnessMs = FRESH_NEWS_WINDOW_MS): boolean {
+  const now = Date.now();
+  if (timestamp > now + UPCOMING_NEWS_WINDOW_MS) return false;
+  return now - timestamp <= freshnessMs;
+}
+
+function isFreshIsoDate(isoDate: string, freshnessMs = FRESH_NEWS_WINDOW_MS): boolean {
+  const ts = toTimestamp(isoDate);
+  return ts !== null ? isWithinFreshWindow(ts, freshnessMs) : false;
+}
+
+function parseFeedDate(pubDate: string): string | null {
+  const ts = toTimestamp(pubDate);
+  if (ts === null) return null;
+  if (!isWithinFreshWindow(ts)) return null;
+  return new Date(ts).toISOString();
+}
+
 function decodeXmlEntities(text: string): string {
   return text
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, "\"")
-    .replace(/&#39;/g, "'");
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/gi, "'");
 }
 
 function extractTag(block: string, tag: string): string {
@@ -775,17 +829,20 @@ function buildNewsQueries(symbol: SymbolInfo): string[] {
     return [
       `${base} forex central bank inflation`,
       `${base} macro economic outlook`,
+      `${base} high impact economic calendar`,
     ];
   }
   if (symbol.marketType === "crypto") {
     return [
       `${base} crypto regulation ETF inflow`,
       `${base} blockchain market sentiment`,
+      `${base} macro risk-on risk-off`,
     ];
   }
   return [
     `${base} stock earnings guidance analyst`,
     `${base} industry macro outlook`,
+    `${base} federal reserve inflation outlook`,
   ];
 }
 
@@ -804,14 +861,21 @@ async function fetchGoogleNewsHeadlines(query: string, limit = 8): Promise<NewsH
     "Google News RSS timeout",
   );
 
-  const headlines = parseRssItems(xml).slice(0, limit).map((item) => ({
-    title: item.title,
-    link: item.link,
-    source: item.source,
-    publishedAt: Number.isFinite(new Date(item.pubDate).getTime()) ? new Date(item.pubDate).toISOString() : new Date().toISOString(),
-    sentiment: inferNewsSentiment(item.title),
-    query,
-  }));
+  const headlines = parseRssItems(xml)
+    .map((item) => {
+      const publishedAt = parseFeedDate(item.pubDate);
+      if (!publishedAt) return null;
+      return {
+        title: item.title,
+        link: item.link,
+        source: item.source,
+        publishedAt,
+        sentiment: inferNewsSentiment(item.title),
+        query,
+      } satisfies NewsHeadline;
+    })
+    .filter((item): item is NewsHeadline => Boolean(item))
+    .slice(0, limit);
 
   setCached(cacheKey, headlines);
   return headlines;
@@ -821,6 +885,7 @@ function mergeUniqueHeadlines(headlines: NewsHeadline[]): NewsHeadline[] {
   const seen = new Set<string>();
   const merged: NewsHeadline[] = [];
   for (const headline of headlines) {
+    if (!isFreshIsoDate(headline.publishedAt)) continue;
     const key = `${headline.link}|${headline.title}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -836,7 +901,9 @@ async function fetchMarketHeadlines(symbol: SymbolInfo): Promise<NewsHeadline[]>
       fetchGoogleNewsHeadlines(query, 10).catch(() => []),
     ),
   );
-  return mergeUniqueHeadlines(results.flat()).slice(0, 18);
+  const merged = mergeUniqueHeadlines(results.flat());
+  if (merged.length) return merged.slice(0, 18);
+  return fetchGoogleNewsHeadlines(`${symbol.displaySymbol} market outlook`, 8).catch(() => []);
 }
 
 function inferImpactFromHeadline(title: string): "high" | "medium" | "low" {
@@ -846,8 +913,31 @@ function inferImpactFromHeadline(title: string): "high" | "medium" | "low" {
   return "low";
 }
 
+function inferCurrencyFromText(text: string): string | undefined {
+  const value = text.toLowerCase();
+  const map: Array<[RegExp, string]> = [
+    [/\bus\b|\bunited states\b|\bfed\b|\bdollar\b|\busd\b/, "USD"],
+    [/\beuro\b|\becb\b|\beur\b/, "EUR"],
+    [/\bboe\b|\bsterling\b|\bpound\b|\bgbp\b/, "GBP"],
+    [/\bboj\b|\byen\b|\bjpy\b/, "JPY"],
+    [/\baud\b|\baustralia\b|\brba\b/, "AUD"],
+    [/\bnzd\b|\bnew zealand\b|\brbnz\b/, "NZD"],
+    [/\bcad\b|\bcanada\b|\bboc\b/, "CAD"],
+    [/\bchf\b|\bswiss\b|\bsnb\b/, "CHF"],
+    [/\bgold\b|\bxau\b/, "XAU"],
+    [/\bsilver\b|\bxag\b/, "XAG"],
+    [/\bbitcoin\b|\bbtc\b/, "BTC"],
+    [/\bethereum\b|\beth\b/, "ETH"],
+  ];
+  for (const [pattern, currency] of map) {
+    if (pattern.test(value)) return currency;
+  }
+  return undefined;
+}
+
 function buildCalendarFromHeadlines(headlines: NewsHeadline[]): CalendarItem[] {
   const tagged = headlines
+    .filter((item) => isFreshIsoDate(item.publishedAt))
     .filter((item) => /(fomc|interest rate|nfp|cpi|inflation|earnings|gdp|pmi|jobless|opec|ecb|boj|fed)/i.test(item.title))
     .slice(0, 10)
     .map((item) => ({
@@ -855,9 +945,273 @@ function buildCalendarFromHeadlines(headlines: NewsHeadline[]): CalendarItem[] {
       impact: inferImpactFromHeadline(item.title),
       timestamp: item.publishedAt,
       source: item.source,
+      currency: inferCurrencyFromText(item.title),
+      link: item.link,
+      isUpcoming: false,
     }));
 
   return tagged.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+}
+
+function normalizeImpact(value: string): "high" | "medium" | "low" {
+  const text = value.toLowerCase();
+  if (text.includes("high")) return "high";
+  if (text.includes("medium") || text.includes("med")) return "medium";
+  return "low";
+}
+
+function normalizeCalendarDate(dateText: string): string {
+  const cleaned = decodeXmlEntities(dateText).replace(/\s+/g, " ").trim();
+  if (!cleaned) return "";
+
+  if (/^\d{1,2}-\d{1,2}-\d{4}$/.test(cleaned)) {
+    const [month, day, year] = cleaned.split("-");
+    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  }
+
+  if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(cleaned)) {
+    const [year, month, day] = cleaned.split("-");
+    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  }
+
+  if (/^[A-Za-z]{3,9}\s+\d{1,2}$/.test(cleaned)) {
+    return `${cleaned} ${new Date().getUTCFullYear()}`;
+  }
+
+  return cleaned;
+}
+
+function normalizeCalendarTime(timeText: string): string {
+  const cleaned = decodeXmlEntities(timeText).replace(/\s+/g, " ").trim();
+  if (!cleaned || /tentative|all day|day \d+/i.test(cleaned)) return "00:00";
+  return cleaned.replace(/\./g, "");
+}
+
+function parseCalendarTimestamp(dateText: string, timeText: string): number | null {
+  const datePart = normalizeCalendarDate(dateText);
+  if (!datePart) return null;
+  const timePart = normalizeCalendarTime(timeText);
+
+  const candidates = [
+    `${datePart} ${timePart} UTC`,
+    `${datePart} UTC`,
+    `${datePart} ${timePart}`,
+    datePart,
+  ];
+
+  for (const candidate of candidates) {
+    const ts = Date.parse(candidate);
+    if (Number.isFinite(ts)) return ts;
+  }
+
+  return null;
+}
+
+function parseForexFactoryCalendar(xml: string): CalendarItem[] {
+  const events: CalendarItem[] = [];
+  const regex = /<event>([\s\S]*?)<\/event>/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(xml)) !== null) {
+    const block = match[1];
+    const event = decodeXmlEntities(extractTag(block, "title") || extractTag(block, "event")).replace(/\s+/g, " ").trim();
+    const country = decodeXmlEntities(extractTag(block, "country")).trim().toUpperCase();
+    const dateText = extractTag(block, "date");
+    const timeText = extractTag(block, "time");
+    const impactText = extractTag(block, "impact");
+    const link = decodeXmlEntities(extractTag(block, "url") || extractTag(block, "link"));
+    const timestamp = parseCalendarTimestamp(dateText, timeText);
+
+    if (!event || timestamp === null) continue;
+    if (!isWithinFreshWindow(timestamp)) continue;
+
+    events.push({
+      event,
+      impact: normalizeImpact(impactText),
+      timestamp: new Date(timestamp).toISOString(),
+      source: "ForexFactory",
+      currency: country || undefined,
+      link: link || undefined,
+      isUpcoming: timestamp > Date.now(),
+    });
+  }
+
+  return events;
+}
+
+function getSymbolCurrencies(symbol: SymbolInfo): string[] {
+  const display = symbol.displaySymbol.toUpperCase();
+  if (symbol.marketType === "forex") {
+    const pair = display.replace("=X", "").replace("/", "");
+    if (pair.length >= 6) return [pair.slice(0, 3), pair.slice(3, 6)];
+  }
+  if (symbol.marketType === "crypto") {
+    if (display.includes("/")) {
+      const [base, quote] = display.split("/");
+      return [base, quote];
+    }
+    if (display.includes("-")) {
+      const [base, quote] = display.split("-");
+      return [base, quote];
+    }
+  }
+  return ["USD"];
+}
+
+function mergeCalendarItems(items: CalendarItem[]): CalendarItem[] {
+  const seen = new Set<string>();
+  const merged: CalendarItem[] = [];
+
+  for (const item of items) {
+    if (!isFreshIsoDate(item.timestamp)) continue;
+    const key = `${item.event}|${item.timestamp}|${item.source}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push({
+      ...item,
+      isUpcoming: toTimestamp(item.timestamp)! > Date.now(),
+    });
+  }
+
+  return merged.sort((a, b) => {
+    const at = toTimestamp(a.timestamp) ?? 0;
+    const bt = toTimestamp(b.timestamp) ?? 0;
+    const an = a.isUpcoming ? 0 : 1;
+    const bn = b.isUpcoming ? 0 : 1;
+    if (an !== bn) return an - bn;
+    return an === 0 ? at - bt : bt - at;
+  });
+}
+
+async function fetchEconomicCalendar(symbol: SymbolInfo): Promise<CalendarItem[]> {
+  const cacheKey = `econ:${symbol.querySymbol}`;
+  const cached = getCached<CalendarItem[]>(cacheKey);
+  if (cached) return cached;
+
+  const [forexFactoryEvents, fallbackHeadlines] = await Promise.all([
+    withTimeout(
+      fetch("https://nfs.faireconomy.media/ff_calendar_thisweek.xml").then(async (resp) => {
+        if (!resp.ok) throw new Error(`ForexFactory calendar failed (${resp.status})`);
+        return resp.text();
+      }),
+      REQUEST_TIMEOUT_MS,
+      "ForexFactory calendar timeout",
+    )
+      .then((xml) => parseForexFactoryCalendar(xml))
+      .catch(() => []),
+    fetchGoogleNewsHeadlines("US economic calendar today", 12).catch(() => []),
+  ]);
+
+  const symbolCurrencies = getSymbolCurrencies(symbol);
+  const headlineCalendar = buildCalendarFromHeadlines(fallbackHeadlines).map((item) => ({
+    ...item,
+    source: `${item.source} (News)`,
+  }));
+
+  const merged = mergeCalendarItems([...forexFactoryEvents, ...headlineCalendar])
+    .filter((item) => {
+      if (!item.currency) return item.impact === "high";
+      return symbolCurrencies.includes(item.currency.toUpperCase());
+    })
+    .slice(0, 20);
+
+  setCached(cacheKey, merged);
+  return merged;
+}
+
+function buildIntelNarrative(symbol: SymbolInfo, headlines: NewsHeadline[], calendar: CalendarItem[]): IntelNarrative {
+  const sentimentScore = headlines.reduce((sum, item) => {
+    if (item.sentiment === "positive") return sum + 1;
+    if (item.sentiment === "negative") return sum - 1;
+    return sum;
+  }, 0);
+
+  const now = Date.now();
+  const upcomingHighImpact = calendar.filter((item) => {
+    if (item.impact !== "high") return false;
+    const ts = toTimestamp(item.timestamp);
+    if (ts === null) return false;
+    return ts >= now && ts - now <= 24 * 60 * 60 * 1000;
+  }).length;
+
+  const recentHighImpact = calendar.filter((item) => {
+    if (item.impact !== "high") return false;
+    const ts = toTimestamp(item.timestamp);
+    if (ts === null) return false;
+    return ts < now && now - ts <= 24 * 60 * 60 * 1000;
+  }).length;
+
+  let bias: "bullish" | "bearish" | "neutral" = "neutral";
+  if (sentimentScore >= 2) bias = "bullish";
+  if (sentimentScore <= -2) bias = "bearish";
+
+  let warningLevel: "high" | "medium" | "low" = "low";
+  if (upcomingHighImpact >= 2) warningLevel = "high";
+  else if (upcomingHighImpact === 1 || recentHighImpact >= 2) warningLevel = "medium";
+
+  const strength = clamp(
+    45 + Math.abs(sentimentScore) * 8 + upcomingHighImpact * 10 + recentHighImpact * 4,
+    35,
+    95,
+  );
+
+  const factors: string[] = [];
+  factors.push(`${headlines.length} fresh headlines (<=48h) for ${symbol.displaySymbol}.`);
+  if (sentimentScore > 0) factors.push("Headline sentiment skews positive.");
+  if (sentimentScore < 0) factors.push("Headline sentiment skews risk-off.");
+  if (upcomingHighImpact > 0) factors.push(`${upcomingHighImpact} high-impact event(s) due in next 24h.`);
+  if (recentHighImpact > 0) factors.push(`${recentHighImpact} high-impact event(s) occurred in last 24h.`);
+  if (!factors.length) factors.push("No strong catalyst concentration detected.");
+
+  const summary =
+    warningLevel === "high"
+      ? "High-impact macro events are close. Prefer confirmation after news release before opening new positions."
+      : warningLevel === "medium"
+        ? "Catalyst risk is moderate. Keep position size smaller and avoid late entries."
+        : bias === "bullish"
+          ? "News flow is mildly supportive. Bias can lean long if price action confirms."
+          : bias === "bearish"
+            ? "News flow is defensive. Bias can lean short if structure breaks support."
+            : "Mixed news flow. Wait for technical confirmation and avoid overtrading.";
+
+  return {
+    bias,
+    warningLevel,
+    strength: round(strength, 1),
+    summary,
+    factors: factors.slice(0, 5),
+    sentimentScore,
+    upcomingHighImpact,
+    recentHighImpact,
+  };
+}
+
+function buildIntelWarnings(
+  narrative: IntelNarrative,
+  headlines: NewsHeadline[],
+  calendar: CalendarItem[],
+): string[] {
+  const warnings: string[] = [];
+  if (!headlines.length) warnings.push("Fresh headline coverage is low. Treat signal quality as reduced.");
+  if (!calendar.length) warnings.push("Economic calendar feed is limited right now. Cross-check manually before entry.");
+  if (narrative.upcomingHighImpact > 0) {
+    warnings.push(
+      `${narrative.upcomingHighImpact} high-impact event(s) are scheduled in <24h. Spread/slippage can widen.`,
+    );
+  }
+  if (narrative.warningLevel === "high") {
+    warnings.push("Use strict risk controls: smaller size, wider buffer, and confirmation candle after release.");
+  }
+  return warnings.slice(0, 4);
+}
+
+function resolveFeedUpdatedAt(headlines: NewsHeadline[], calendar: CalendarItem[]): string {
+  const timestamps = [
+    ...headlines.map((item) => toTimestamp(item.publishedAt) ?? 0),
+    ...calendar.map((item) => toTimestamp(item.timestamp) ?? 0),
+  ].filter((value) => value > 0);
+  if (!timestamps.length) return new Date().toISOString();
+  return new Date(Math.max(...timestamps)).toISOString();
 }
 
 function classifyRegion(title: string): string {
@@ -895,7 +1249,8 @@ async function fetchGeopoliticalEvents(): Promise<GeopoliticalEvent[]> {
   );
 
   const events: GeopoliticalEvent[] = mergeUniqueHeadlines(results.flat())
-    .slice(0, 28)
+    .filter((item) => isFreshIsoDate(item.publishedAt))
+    .slice(0, 40)
     .map((item) => ({
       title: item.title,
       region: classifyRegion(item.title),
@@ -903,10 +1258,25 @@ async function fetchGeopoliticalEvents(): Promise<GeopoliticalEvent[]> {
       publishedAt: item.publishedAt,
       source: item.source,
       link: item.link,
-    }));
+    }))
+    .sort((a, b) => {
+      const riskWeight = { high: 3, medium: 2, low: 1 };
+      const rw = riskWeight[b.riskLevel] - riskWeight[a.riskLevel];
+      if (rw !== 0) return rw;
+      return (toTimestamp(b.publishedAt) ?? 0) - (toTimestamp(a.publishedAt) ?? 0);
+    })
+    .slice(0, 28);
 
   setCached(cacheKey, events);
   return events;
+}
+
+function resolveGeoUpdatedAt(events: GeopoliticalEvent[]): string {
+  const timestamps = events
+    .map((event) => toTimestamp(event.publishedAt) ?? 0)
+    .filter((value) => value > 0);
+  if (!timestamps.length) return new Date().toISOString();
+  return new Date(Math.max(...timestamps)).toISOString();
 }
 
 function toFiniteNumber(value: unknown): number | null {
